@@ -38,6 +38,10 @@
 		{
 			"Name": "ProceduralMeshComponent",
 			"Enabled": true
+		},
+		{
+			"Name": "MassBattleSystem",
+			"Enabled": true
 		}
 	],
 	"SupportURL": "https://github.com/winyunq/RTSInputSystem/issues",

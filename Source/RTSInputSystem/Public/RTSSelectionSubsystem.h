@@ -67,6 +67,12 @@ class RTSINPUTSYSTEM_API URTSSelectionSubsystem : public ULocalPlayerSubsystem
 {
 	GENERATED_BODY()
 
+private:
+	static URTSSelectionSubsystem* Instance;
+
+public:
+	FORCEINLINE static URTSSelectionSubsystem* GetInstance() { return Instance; }
+
 public:
 	/**
 	 * O(1) visual-feedback event emitted once per player command.

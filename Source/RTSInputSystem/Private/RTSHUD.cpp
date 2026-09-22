@@ -10,13 +10,15 @@
 #include "Engine/Texture2D.h"
 #include "EngineUtils.h"
 #include "GameFramework/PlayerController.h"
+#include "MassBattleInputFuncLib.h"
 
 bool ARTSHUD::ResolveSingleSelectableAtScreenPosition(
 	APlayerController* PlayerController,
 	const FVector2D& ScreenPosition,
 	AActor*& OutActor,
 	FEntityHandle& OutEntity,
-	FVector& OutWorldLocation)
+	FVector& OutWorldLocation,
+	bool bIncludeEnemies)
 {
 	OutActor = nullptr;
 	OutEntity.Reset();
@@ -74,10 +76,15 @@ bool ARTSHUD::ResolveSingleSelectableAtScreenPosition(
 				Candidate = Candidate->GetAttachParentActor();
 			}
 
-			if (!Candidate
-				|| !Candidate->FindComponentByClass<URTSSelectable>()
-				|| (SelectionSubsystem
-					&& !SelectionSubsystem->IsActorControllable(Candidate)))
+			if (!Candidate 
+				|| !Candidate->FindComponentByClass<URTSSelectable>())
+			{
+				continue;
+			}
+			// 默认仅接受可控（己方）候选；bIncludeEnemies 时（悬停）也允许敌方 Actor。
+			if (!bIncludeEnemies 
+				&& SelectionSubsystem 
+				&& !SelectionSubsystem->IsActorControllable(Candidate))
 			{
 				continue;
 			}
@@ -164,7 +171,8 @@ bool ARTSHUD::ResolveSingleSelectableAtScreenPosition(
 		if (bHitMass && !Results.IsEmpty())
 		{
 			const FTraceResult& Result = Results[0];
-			if (!SelectionSubsystem
+			if (bIncludeEnemies 
+				|| !SelectionSubsystem 
 				|| SelectionSubsystem->IsEntityControllable(Result.Entity))
 			{
 				MassCandidate = Result.Entity;
@@ -543,8 +551,7 @@ void ARTSHUD::PerformScreenSelection(
 	ERTSSelectionModifier Modifier = ERTSSelectionModifier::Replace;
 	const float DragDistanceSq = FVector2D::DistSquared(StartPoint, EndPoint);
 	const bool bIsClick = DragDistanceSq <= ClickThresholdSq;
-	if (PlayerController->IsInputKeyDown(EKeys::LeftShift)
-		|| PlayerController->IsInputKeyDown(EKeys::RightShift))
+	if (UMassBattleInputFuncLib::IsShiftDown())
 	{
 		Modifier = ERTSSelectionModifier::Add;
 	}

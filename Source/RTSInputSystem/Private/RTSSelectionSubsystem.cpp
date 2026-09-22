@@ -41,6 +41,8 @@
 
 DEFINE_LOG_CATEGORY(LogORTSSelection);
 
+URTSSelectionSubsystem* URTSSelectionSubsystem::Instance = nullptr;
+
 void URTSSelectionSubsystem::RequestCommandRefresh()
 {
 	if (bCommandRefreshInProgress)
@@ -996,6 +998,8 @@ void URTSSelectionSubsystem::Initialize(FSubsystemCollectionBase& Collection)
 {
 	Super::Initialize(Collection);
 
+	Instance = this;
+
     // C++ Auto-Config Grid (Transient)
     // If no grid is provided, use the built-in MassBattle unit grid.
     if (DefaultEntityGrid.IsNull())
@@ -1010,6 +1014,8 @@ void URTSSelectionSubsystem::Initialize(FSubsystemCollectionBase& Collection)
 
 void URTSSelectionSubsystem::Deinitialize()
 {
+	Instance = nullptr;
+
 	OnCommandFeedbackIssued.Clear();
 	OnUnitHealthChanged.Clear();
 	ControlGroups.Reset();
@@ -1254,7 +1260,7 @@ bool URTSSelectionSubsystem::IsEntityControllable(const FEntityHandle& Handle) c
 
 	const FTeam* Team = EntityManager.GetFragmentDataPtr<FTeam>(NativeHandle);
 	const FSelect* Select = EntityManager.GetFragmentDataPtr<FSelect>(NativeHandle);
-	return Team && Team->index == PlayerTeamIndex && (!Select || Select->bEnable);
+	return PlayerTeamIndex == 127 || (Team && Team->index == PlayerTeamIndex);
 }
 
 bool URTSSelectionSubsystem::IsActorControllable(const AActor* Actor) const

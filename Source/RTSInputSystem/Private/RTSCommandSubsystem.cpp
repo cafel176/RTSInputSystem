@@ -492,8 +492,8 @@ bool URTSCommandSubsystem::IssueCommandForEntities(UObject* WorldContext, FGamep
 	if (!InputOwner && !Owners.IsEmpty()) InputOwner = Owners[0];
 	const auto* Battle = UMassBattleSubsystem::GetPtr(WorldContext);
 	const auto* Network = UMassBattleNetworkSubsystem::GetPtr(WorldContext);
-	if (Battle && Battle->bNetworkedMode && (!Network
-		|| (!Network->IsInCommandExecution() && !Network->IsInLevelInitialization())))
+	if (Battle && Battle->bNetworkedMode && 
+		(!Network || !Network->IsInCommandExecution()))
 	{
 		// A native observer belongs to the already accepted execution. Strategic
 		// records supply it when their existing lockstep command is consumed.
@@ -799,8 +799,17 @@ bool URTSCommandSubsystem::IssueMoveTo(UObject* WorldContext,
 			TEXT("Move command batch: Units=%d Navigation=%s Layer=%d"),
 			Batch.Entities.Num(), GetNavigationModeName(Batch.Navigation.Mode),
 			Batch.Navigation.FlowFieldLayer.LayerID);
+		FAgentTaskVisualizationConfig Viz;
+		Viz.bEnabled = true;
+		Viz.bDrawAgentMarker = false;
+		Viz.bDrawConnection = true;
+		Viz.bDrawGoalMarker = true;
+		Viz.Color = bCanInterrupt ? FColor::Blue : FColor::Green;
+		Viz.Duration = 1.f;               // 任务运行期间持续绘制
+		Viz.LineThickness = 0.f;
+		Viz.GoalMarkerRadius = 200.f;
 		if (UMassBattleBPTaskAgentsMoveTo* MoveTask = UMassBattleBPTaskAgentsMoveTo::AgentsMoveTo(
-			WorldContext, Batch.Entities, Goal, Batch.Navigation, MoveFailCondition, bCanInterrupt))
+			WorldContext, Batch.Entities, Goal, Batch.Navigation, MoveFailCondition, bCanInterrupt, Viz))
 		{
 			if (QueueOwner)
 			{
@@ -841,8 +850,17 @@ bool URTSCommandSubsystem::IssueAttackTarget(UObject* WorldContext,
 	if (!UMassAPIFuncLib::IsValid(WorldContext, TargetHandle)) return false;
 	FMBMoveFailCondition ChaseFailCondition;
 	ChaseFailCondition.StuckTimeLimit = 0.0f;
+	FAgentTaskVisualizationConfig Viz;
+	Viz.bEnabled = true;
+	Viz.bDrawAgentMarker = false;
+	Viz.bDrawConnection = true;
+	Viz.bDrawGoalMarker = true;
+	Viz.Color = FColor::Red;
+	Viz.Duration = 1.f;               // 任务运行期间持续绘制
+	Viz.LineThickness = 0.f;
+	Viz.GoalMarkerRadius = 200.f;
 	if (UMassBattleBPTaskAgentsChaseAttack* ChaseTask = UMassBattleBPTaskAgentsChaseAttack::AgentsChaseAttack(
-		WorldContext, SelectedEntities, TargetHandle, bTargetBehaviorsCanInterrupt, ChaseFailCondition))
+		WorldContext, SelectedEntities, TargetHandle, bTargetBehaviorsCanInterrupt, ChaseFailCondition, Viz))
 	{
 		if (TasksPrepared) TasksPrepared({}, ChaseTask);
 		ChaseTask->Activate();

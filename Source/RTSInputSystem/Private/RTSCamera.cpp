@@ -247,7 +247,7 @@ void URTSCamera::BeginPlay()
 		this->validateEnhancedInputAvailability();
 		RemoveCommandCardKeysFromCameraContext(this->inputMappingContext);
 		this->registerInputMappingContext();
-		this->bindActionCallbacks();
+		//this->bindActionCallbacks();
 		FViewport::ViewportResizedEvent.AddUObject(this, &URTSCamera::handleViewportResized);
 	}
 }

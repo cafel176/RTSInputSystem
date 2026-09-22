@@ -31,7 +31,9 @@ public:
 		const FVector2D& ScreenPosition,
 		AActor*& OutActor,
 		struct FEntityHandle& OutEntity,
-		FVector& OutWorldLocation);
+		FVector& OutWorldLocation,
+		bool bIncludeEnemies = false);
+
 	UPROPERTY(BlueprintReadWrite, EditAnywhere, Category = "Selection Box")
 	FLinearColor SelectionBoxColor;
 

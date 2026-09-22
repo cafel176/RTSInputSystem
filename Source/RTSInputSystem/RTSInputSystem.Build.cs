@@ -36,8 +36,10 @@ public class RTSInputSystem : ModuleRules
 				"MassEntity",
 				"Niagara",
 				"SlateCore",
-				"UMG"
-			}
+				"UMG",
+                "MassBattleInput",
+                "MassBattleSystem"
+            }
 		);
 
 		PrivateDependencyModuleNames.AddRange(

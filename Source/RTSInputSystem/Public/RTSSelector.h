@@ -106,6 +106,12 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "RTSCamera - Selection")
 	bool CommitPendingTargetingAtWorldLocation(FVector WorldLocation);
 
+	void OnIssueCommand_Outer()
+	{
+		FInputActionValue Value;
+		OnIssueCommand(Value);
+	}
+
 	// Input Action handler for Right Click
 	UFUNCTION(BlueprintCallable, Category = "RTSCamera - Selection")
 	void OnIssueCommand(const FInputActionValue& Value);
@@ -131,6 +137,10 @@ public:
 
 	UFUNCTION(BlueprintCallable, Category = "RTSCamera - Selection")
 	void OnSelectionEnd(const FInputActionValue& Value);
+
+	/** 跳过当前左键选择流程：用于 Canvas HUD 等非 UMG 点击目标消费本次鼠标点击。 */
+	UFUNCTION(BlueprintCallable, Category = "RTSCamera - Selection")
+	void SkipCurrentSelectionClick();
 
 	UPROPERTY(BlueprintReadOnly, Category = "RTSCamera - Selection")
 	TArray<URTSSelectable*> SelectedActors;
@@ -159,6 +169,11 @@ public:
 
 	UFUNCTION(BlueprintPure, Category = "RTSCamera - Hash Grid Selection")
 	bool IsHashGridSelectionActive() const { return bIsHashGridSelecting; }
+
+	void SetupPlayerInputComponent_Outer(UInputComponent* PlayerInputComponent)
+	{
+		SetupPlayerInputComponent(PlayerInputComponent);
+	}
 
 protected:
 	virtual void BeginPlay() override;
@@ -247,7 +262,7 @@ private:
 	void UpdateSelectableHoverPreview(const FVector2D& ScreenPosition);
 	void ClearSelectableHoverPreview(bool bRestoreDefaultCursor);
 	void EnsureSelectionFxRenderer();
-	void RegisterControlGroupHotkeys();
+	void RegisterControlGroupHotkeys(UInputComponent* InputComponent);
 	void UnregisterControlGroupHotkeys();
 	void HandleControlGroupHotkey(int32 GroupIndex);
 	void TryBindTopSelectButtons();

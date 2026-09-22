@@ -588,7 +588,7 @@ bool URTSActiveGroupWidget::UpdatePortraitPreview()
 		UNiagaraDataInterfaceArrayFunctionLibrary::SetNiagaraArrayInt32(
 			PortraitPreviewComponent,
 			FName("MeshIndex_Array"),
-			TArray<int32>{Renderer->GetRenderableMeshIndex(RequestedLOD)});
+			TArray<int32>{RequestedLOD});
 	}
 	if (Batch->bUseStyleArray)
 	{

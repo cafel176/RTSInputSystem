@@ -42,6 +42,9 @@
 #include "HAL/IConsoleManager.h"
 #include "Rendering/DrawElements.h"
 #include "Widgets/SLeafWidget.h"
+#include "Tasks/MassBattleBPTaskAgentsChaseAttack.h" // 直接对选中的实体发起追击攻击
+#include "MassBattleInputFuncLib.h"
+#include "VarSystem/MassBattleGlobalVarFunctionLibrary.h"
 
 DECLARE_STATS_GROUP(TEXT("RTS Input Feedback"), STATGROUP_RTSInputFeedback, STATCAT_Advanced);
 DECLARE_CYCLE_STAT(
@@ -807,8 +810,8 @@ void URTSSelector::BeginPlay()
 		this->InstallStrategyMouseCursors();
 		this->EnsureSelectionFxRenderer();
 		this->BindInputMappingContext();
-		this->BindInputActions();
-		this->RegisterControlGroupHotkeys();
+		//this->BindInputActions();
+		//this->RegisterControlGroupHotkeys();
 		this->TryBindTopSelectButtons();
 		if (UGameViewportSubsystem* ViewportSubsystem =
 			UGameViewportSubsystem::Get())
@@ -913,7 +916,7 @@ void URTSSelector::EndPlay(const EEndPlayReason::Type EndPlayReason)
 		}
 	}
 
-	UnregisterControlGroupHotkeys();
+	//UnregisterControlGroupHotkeys();
 	UnbindTopSelectButtons();
 	ClearSelectedPathPreview();
 	ClearMoveCommandFeedback();
@@ -1290,12 +1293,15 @@ void URTSSelector::SetupPlayerInputComponent(UInputComponent* PlayerInputCompone
 	if (const auto InputComponent = Cast<UEnhancedInputComponent>(PlayerInputComponent))
 	{
 		InputComponent->BindAction(this->BeginSelection, ETriggerEvent::Started, this, &URTSSelector::OnSelectionStart);
+		InputComponent->BindAction(this->BeginSelection, ETriggerEvent::Triggered, this, &URTSSelector::OnUpdateSelection);
 		InputComponent->BindAction(this->BeginSelection, ETriggerEvent::Completed, this, &URTSSelector::OnSelectionEnd);
 		InputComponent->BindAction(this->BeginSelection, ETriggerEvent::Canceled, this, &URTSSelector::OnSelectionEnd);
 		if (this->IssueCommandAction)
 		{
 			InputComponent->BindAction(this->IssueCommandAction, ETriggerEvent::Started, this, &URTSSelector::OnIssueCommand);
 		}
+
+		RegisterControlGroupHotkeys(InputComponent);
 	}
 }
 
@@ -1353,32 +1359,43 @@ void URTSSelector::BindInputActions()
 	}
 }
 
-void URTSSelector::RegisterControlGroupHotkeys()
+void URTSSelector::RegisterControlGroupHotkeys(UInputComponent* InputComponent)
 {
-	const URTSInputPanelSettings* Settings = GetDefault<URTSInputPanelSettings>();
-	if (!PlayerController || !PlayerController->InputComponent || (Settings && !Settings->bEnableControlGroupHotkeys))
+	if (!InputComponent)
 	{
-		return;
+		const URTSInputPanelSettings* Settings = GetDefault<URTSInputPanelSettings>();
+		if (!PlayerController || !PlayerController->InputComponent || (Settings && !Settings->bEnableControlGroupHotkeys))
+		{
+			return;
+		}
+
+		UnregisterControlGroupHotkeys();
 	}
 
-	UnregisterControlGroupHotkeys();
 	UWorld* InputWorld = GetWorld();
 	if (!InputWorld)
 	{
 		return;
 	}
 
-	ControlGroupInputComponent = NewObject<UInputComponent>(PlayerController);
-	if (!ControlGroupInputComponent)
+	if (InputComponent)
 	{
-		return;
+		ControlGroupInputComponent = InputComponent;
 	}
+	else
+	{
+		ControlGroupInputComponent = NewObject<UInputComponent>(PlayerController);
+		if (!ControlGroupInputComponent)
+		{
+			return;
+		}
 
-	ControlGroupInputComponent->Priority = 10;
-	ControlGroupInputComponent->bBlockInput = false;
-	ControlGroupInputComponent->RegisterComponentWithWorld(InputWorld);
-	PlayerController->PushInputComponent(ControlGroupInputComponent);
-	ControlGroupInputOwner = PlayerController;
+		ControlGroupInputComponent->Priority = 10;
+		ControlGroupInputComponent->bBlockInput = false;
+		ControlGroupInputComponent->RegisterComponentWithWorld(InputWorld);
+		PlayerController->PushInputComponent(ControlGroupInputComponent);
+		ControlGroupInputOwner = PlayerController;
+	}
 
 	const FKey NumberKeys[] =
 	{
@@ -1446,9 +1463,9 @@ void URTSSelector::HandleControlGroupHotkey(int32 GroupIndex)
 		return;
 	}
 
-	const bool bControlDown = PlayerController->IsInputKeyDown(EKeys::LeftControl) || PlayerController->IsInputKeyDown(EKeys::RightControl);
-	const bool bShiftDown = PlayerController->IsInputKeyDown(EKeys::LeftShift) || PlayerController->IsInputKeyDown(EKeys::RightShift);
-	const bool bAltDown = PlayerController->IsInputKeyDown(EKeys::LeftAlt) || PlayerController->IsInputKeyDown(EKeys::RightAlt);
+	const bool bControlDown = UMassBattleInputFuncLib::IsCtrlDown();
+	const bool bShiftDown = UMassBattleInputFuncLib::IsShiftDown();
+	const bool bAltDown = UMassBattleInputFuncLib::IsAltDown();
 
 	if (bAltDown)
 	{
@@ -1601,7 +1618,8 @@ void URTSSelector::UpdateSelectableHoverPreview(
 			ScreenPosition,
 			HoveredActor,
 			HoveredEntity,
-			HoveredWorldLocation);
+			HoveredWorldLocation,
+			/*bIncludeEnemies=*/true);
 	(void)HoveredWorldLocation;
 	URTSSelectable* HoveredSelectable = HoveredActor
 		? HoveredActor->FindComponentByClass<URTSSelectable>()
@@ -1645,10 +1663,44 @@ void URTSSelector::UpdateSelectableHoverPreview(
 		}
 	}
 
-	bCursorOverSelectable = bHasSelectable;
-	PlayerController->CurrentMouseCursor = bHasSelectable
-		? EMouseCursor::GrabHand
-		: EMouseCursor::Default;
+	// 依据是否有可选中对象切换光标（可选中用 GrabHand，否则默认）。
+	//  - Ctrl 按下：攻击/移动攻击预览 → Crosshairs（橙红 Targeting 光标）
+	//  - 己方可控单位：GrabHand（绿色 Selectable 光标，表示可选中/可命令）
+	//  - 敌方单位：Crosshairs（橙红 Targeting 光标，表示可攻击/敌方目标）
+	//  - 其它/地面：Default
+	const bool bAttackMoveHeld = UMassBattleInputFuncLib::IsCtrlDown();
+	bCursorOverSelectable = bHasSelectable || bAttackMoveHeld;
+	EMouseCursor::Type Cursor = EMouseCursor::Default;
+	if (bAttackMoveHeld)
+	{
+		// Ctrl 按下：按下右键将对地面/目标下达移动攻击，光标切为攻击样式。
+		Cursor = EMouseCursor::Crosshairs;
+	}
+	else if (bHasSelectable)
+	{
+		bool bIsEnemy = false;
+		URTSSelectionSubsystem* Selection = nullptr;
+		if (PlayerController && PlayerController->GetLocalPlayer())
+		{
+			Selection = PlayerController->GetLocalPlayer()->GetSubsystem<URTSSelectionSubsystem>();
+		}
+		if (Selection)
+		{
+			// ResolveSingleSelectableAtScreenPosition 会互斥返回 Actor 或 Mass 实体。
+			if (HoveredSelectable)
+			{
+				AActor* OwnerActor = HoveredSelectable->GetOwner();
+				bIsEnemy = OwnerActor != nullptr
+					&& !Selection->IsActorControllable(OwnerActor);
+			}
+			else if (HoveredEntity.IsSet())
+			{
+				bIsEnemy = !Selection->IsEntityControllable(HoveredEntity);
+			}
+		}
+		Cursor = bIsEnemy ? EMouseCursor::Crosshairs : EMouseCursor::GrabHand;
+	}
+	PlayerController->CurrentMouseCursor = Cursor;
 }
 
 void URTSSelector::BeginTargeting(FGameplayTag CommandTag)
@@ -1704,8 +1756,7 @@ void URTSSelector::CancelTargeting()
 bool URTSSelector::IsCommandQueueModifierDown() const
 {
 	return PlayerController
-		&& (PlayerController->IsInputKeyDown(EKeys::LeftShift)
-			|| PlayerController->IsInputKeyDown(EKeys::RightShift));
+		&& UMassBattleInputFuncLib::IsShiftDown();
 }
 
 bool URTSSelector::CommitPendingTargetingAtCursor()
@@ -1873,6 +1924,8 @@ bool URTSSelector::ResolveSmartCommandHit(FHitResult& OutHit, bool& bOutHostileU
 
 void URTSSelector::OnIssueCommand(const FInputActionValue& Value)
 {
+	if (!UMassBattleGlobalVarFunctionLibrary::GetCanAcceptOrder(this)) return;
+	if (UMassBattleInputFuncLib::IsMouseOverUI()) return;
 	if (!PlayerController) return;
 
 	FHitResult Hit;
@@ -1903,8 +1956,7 @@ void URTSSelector::OnIssueCommand(const FInputActionValue& Value)
 		{
 			if (URTSSelectionSubsystem* SelectionSubsystem = LocalPlayer->GetSubsystem<URTSSelectionSubsystem>())
 			{
-				const bool bQueueCommand = PlayerController->IsInputKeyDown(EKeys::LeftShift)
-					|| PlayerController->IsInputKeyDown(EKeys::RightShift);
+				const bool bQueueCommand = UMassBattleInputFuncLib::IsShiftDown();
 				AActor* HitActor = CommandHit.GetActor();
 				const FGameplayTag AttackTag = FGameplayTag::RequestGameplayTag(FName("RTS.Command.Attack"), false);
 				if (bHostileUnitTarget && HitActor)
@@ -1913,8 +1965,99 @@ void URTSSelector::OnIssueCommand(const FInputActionValue& Value)
 				}
 				else
 				{
-					const FGameplayTag MoveTag = FGameplayTag::RequestGameplayTag(FName("RTS.Command.Move"), false);
-					SelectionSubsystem->IssueCommandWithLocation(MoveTag, CommandHit.Location, bQueueCommand);
+					// 最小补充：Actor 线射未锁定目标时，探测光标下的敌对 Mass 实体。
+					// 命中敌对实体则直接让选中的实体对其实施追击攻击，否则照常移动。
+					FEntityHandle HostileEntity;
+					FVector2D Mouse = FVector2D::ZeroVector;
+					if (PlayerController->GetMousePosition(Mouse.X, Mouse.Y)
+						&& PlayerController->PlayerCameraManager)
+					{
+						const FVector CameraLoc = PlayerController->PlayerCameraManager->GetCameraLocation();
+						const URTSInputPanelSettings* Settings = GetDefault<URTSInputPanelSettings>();
+						const float Half = FMath::Clamp(
+							Settings ? Settings->SelectionClickHalfSizePixels : 3.f,
+							1.f, 12.f);
+						const FVector2D Corners[4] =
+						{
+							Mouse + FVector2D(-Half, -Half),
+							Mouse + FVector2D(-Half, Half),
+							Mouse + FVector2D(Half, Half),
+							Mouse + FVector2D(Half, -Half)
+						};
+						FViewTracePoints TP;
+						TP.ViewPoint = CameraLoc;
+						for (const FVector2D& C : Corners)
+						{
+							FVector P = FVector::ZeroVector;
+							FVector D = FVector::ForwardVector;
+							if (PlayerController->DeprojectScreenPositionToWorld(C.X, C.Y, P, D))
+							{
+								TP.SelectionPoints.Add(P + D * 100000.f);
+							}
+						}
+						if (TP.SelectionPoints.Num() == 4)
+						{
+							bool bHit = false;
+							TArray<FTraceResult> Res;
+							UMassBattleFuncLib::ViewTraceForAgents(
+								this, bHit, Res, 1, TP, false,
+								FVector::ZeroVector, 1.f,
+								ESortMode::NearToFar, CameraLoc);
+							const FEntityHandle E = (bHit && !Res.IsEmpty()) ? Res[0].Entity : FEntityHandle();
+							// 敌对 = 命中的 Mass 实体不可控（非己方）。
+							if (E.IsSet() && !SelectionSubsystem->IsEntityControllable(E))
+							{
+								HostileEntity = E;
+							}
+						}
+					}
+
+					// 命中敌对实体：让当前可控的选中实体直接对其实施追击攻击。
+					if (HostileEntity.IsSet())
+					{
+						const TArray<FEntityHandle> Attackers = SelectionSubsystem->GetControllableSelectedEntities();
+						if (!Attackers.IsEmpty())
+						{
+							FMBMoveFailCondition FailConditions;
+							FailConditions.StuckVelocityThreshold = 100.0f;
+							FailConditions.StuckTimeLimit = 6.0f;
+
+							// 可视化：仅在被攻击目标处绘制一个红色球体/圆环提示，
+							// 关闭 Agent 与连线绘制，避免画面杂乱。
+							FAgentTaskVisualizationConfig Viz;
+							Viz.bEnabled = true;
+							Viz.bDrawAgentMarker = false;
+							Viz.bDrawConnection = true;
+							Viz.bDrawGoalMarker = true;
+							Viz.Color = FColor::Red;
+							Viz.Duration = 1.f;               // 任务运行期间持续绘制
+							Viz.LineThickness = 0.f;
+							Viz.GoalMarkerRadius = 200.f;
+
+							if (UMassBattleBPTaskAgentsChaseAttack* ChaseTask =
+								UMassBattleBPTaskAgentsChaseAttack::AgentsChaseAttack(
+									this,
+									Attackers,
+									HostileEntity,
+									/*BehaviorsCanInterrupt*/ false,
+									FailConditions,
+									Viz))
+							{
+								ChaseTask->Activate();
+							}
+						}
+					}
+					else
+					{
+						// Ctrl + 点击地面：下达"移动攻击"（对地面使用 RTS.Command.Attack，
+						// 命令层会按可中断移动执行，途中遇敌即可交战）；否则普通移动。
+						const bool bAttackMove = UMassBattleInputFuncLib::IsCtrlDown();
+						const FName GroundTagName = bAttackMove
+							? FName("RTS.Command.Attack")
+							: FName("RTS.Command.Move");
+						const FGameplayTag GroundTag = FGameplayTag::RequestGameplayTag(GroundTagName, false);
+						SelectionSubsystem->IssueCommandWithLocation(GroundTag, CommandHit.Location, bQueueCommand);
+					}
 				}
 			}
 		}
@@ -1925,6 +2068,9 @@ void URTSSelector::OnIssueCommand(const FInputActionValue& Value)
 
 void URTSSelector::OnSelectionStart(const FInputActionValue& Value)
 {
+	if (!UMassBattleGlobalVarFunctionLibrary::GetCanSelect(this))
+		return;
+
 	bIsSelecting = false;
 	ClearSelectableHoverPreview(false);
 
@@ -2021,6 +2167,9 @@ bool URTSSelector::IssuePendingTargetingCommand(const FHitResult& Hit)
 
 void URTSSelector::OnUpdateSelection(const FInputActionValue& Value)
 {
+	if (!UMassBattleGlobalVarFunctionLibrary::GetCanSelect(this))
+		return;
+
 	(void)Value;
 	if (bSkipCurrentSelectionClick || !bIsSelecting || !PlayerController) return;
 	FVector2D MousePosition = SelectionEnd;
@@ -2033,8 +2182,12 @@ void URTSSelector::OnUpdateSelection(const FInputActionValue& Value)
 
 void URTSSelector::OnSelectionEnd(const FInputActionValue& Value)
 {
+	if (!UMassBattleGlobalVarFunctionLibrary::GetCanSelect(this))
+		return;
+
 	if (bSkipCurrentSelectionClick)
 	{
+		bSkipCurrentSelectionClick = false;
 		bIsSelecting = false;
 		return;
 	}
@@ -2060,6 +2213,11 @@ void URTSSelector::OnSelectionEnd(const FInputActionValue& Value)
 		ARTSHUD::PerformScreenSelection(PlayerController, this, SelectionStart, SelectionEnd);
 	}
 
+}
+
+void URTSSelector::SkipCurrentSelectionClick()
+{
+	bSkipCurrentSelectionClick = true;
 }
 
 bool URTSSelector::CanSelectActor_Implementation(AActor *Actor) const {
