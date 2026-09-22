@@ -199,6 +199,11 @@ TSharedRef<SWidget> URTSMinimalHUDWidget::RebuildWidget()
 	return Super::RebuildWidget();
 }
 
+ARTSMinimalHUD::ARTSMinimalHUD()
+{
+	MinimalHUDWidgetClass = URTSMinimalHUDWidget::StaticClass();
+}
+
 void ARTSMinimalHUD::BeginPlay()
 {
 	Super::BeginPlay();
@@ -211,10 +216,10 @@ void ARTSMinimalHUD::BeginPlay()
 
 	if (!MinimalHUDWidgetClass)
 	{
-		MinimalHUDWidgetClass = URTSMinimalHUDWidget::StaticClass();
+		return;
 	}
 
-	MinimalHUDWidget = CreateWidget<URTSMinimalHUDWidget>(
+	MinimalHUDWidget = CreateWidget<UUserWidget>(
 		PlayerController, MinimalHUDWidgetClass);
 	if (MinimalHUDWidget)
 	{

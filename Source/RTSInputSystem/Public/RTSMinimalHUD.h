@@ -31,14 +31,17 @@ class RTSINPUTSYSTEM_API ARTSMinimalHUD : public ARTSHUD
 {
 	GENERATED_BODY()
 
+public:
+	ARTSMinimalHUD();
+
 protected:
 	virtual void BeginPlay() override;
 
 	UPROPERTY(EditDefaultsOnly, Category = "RTS Minimal HUD")
-	TSubclassOf<URTSMinimalHUDWidget> MinimalHUDWidgetClass;
+	TSubclassOf<UUserWidget> MinimalHUDWidgetClass = nullptr;
 
 	UPROPERTY(Transient)
-	TObjectPtr<URTSMinimalHUDWidget> MinimalHUDWidget;
+	TObjectPtr<UUserWidget> MinimalHUDWidget = nullptr;
 };
 
 /** Minimal controller that installs the selector and plugin input actions. */

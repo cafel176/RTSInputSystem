@@ -1535,8 +1535,20 @@ void URTSSelector::InstallStrategyMouseCursors()
 		return;
 	}
 
-	// Platform cursors remain responsive even when the render/game frame stalls.
-	ViewportClient->SetUseSoftwareCursorWidgets(false);
+	// 启用软件光标并为三种状态设置 RTS 指针。
+	ViewportClient->SetUseSoftwareCursorWidgets(true);
+	ViewportClient->SetSoftwareCursorWidget(
+		EMouseCursor::Default,
+		SNew(SRTSStrategyCursor)
+		.Style(ERTSStrategyCursorStyle::Normal));
+	ViewportClient->SetSoftwareCursorWidget(
+		EMouseCursor::GrabHand,
+		SNew(SRTSStrategyCursor)
+		.Style(ERTSStrategyCursorStyle::Selectable));
+	ViewportClient->SetSoftwareCursorWidget(
+		EMouseCursor::Crosshairs,
+		SNew(SRTSStrategyCursor)
+		.Style(ERTSStrategyCursorStyle::Targeting));
 
 	PlayerController->DefaultMouseCursor = EMouseCursor::Default;
 	PlayerController->CurrentMouseCursor = EMouseCursor::Default;
@@ -1550,7 +1562,7 @@ void URTSSelector::RestoreStrategyMouseCursors()
 	if (UGameViewportClient* ViewportClient =
 		LocalPlayer ? LocalPlayer->ViewportClient : nullptr)
 	{
-		ViewportClient->SetUseSoftwareCursorWidgets(false);
+		// 清空三种状态的软件光标并重建。
 		ViewportClient->SetSoftwareCursorWidget(
 			EMouseCursor::Default,
 			TSharedPtr<SWidget>());
