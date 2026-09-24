@@ -6,6 +6,7 @@
 #include "Data/RTSCommandButton.h"
 #include "Data/RTSCommandGridAsset.h"
 #include "Engine/DeveloperSettings.h"
+#include "MassBattleEnums.h"
 #include "Engine/Texture2D.h"
 #include "GameplayTagContainer.h"
 #include "Layout/Margin.h"
@@ -272,6 +273,38 @@ public:
 	// longer used to select a route; in particular, 4096uu is not a path grid.
 	UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category = "RTS Movement Navigation", meta = (ClampMin = "0.0"))
 	float DirectMoveMaxDistance = 4096.0f;
+
+	// ── Move-order formation (multi-unit) ────────────────────────────────────
+	// Replaces "every unit shares one goal point" with "each unit gets its own
+	// slot", so a group ordered to a single location spreads out and settles
+	// instead of shoving / orbiting around one arrival circle.
+	// Generation is synchronous (UMassBattleFuncLib::GenerateCircularFormation)
+	// and deterministic — no random offset and no ground/obstacle traces — so
+	// peers replaying the same command derive identical slots.
+
+	/** Gives every unit its own formation slot on move orders. Off = the whole batch keeps sharing the batch goal (legacy behavior). */
+	UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category = "RTS Movement Formation")
+	bool bEnableMoveFormation = true;
+
+	/** Slot pitch = 2 x average unit radius x this scale. Raise it when the arrival range is much larger than the pitch (formations look loose) or for oversized units. */
+	UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category = "RTS Movement Formation", meta = (ClampMin = "1.0", UIMax = "8.0", Units = "x"))
+	float MoveFormationSlotPitchScale = 1.5f;
+
+	/** Target slot count = ceil(unit count x margin) + automatic large-unit slots. Above 1.0 keeps spare slots so the lattice never runs short. */
+	UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category = "RTS Movement Formation", meta = (ClampMin = "1.0", ClampMax = "4.0"))
+	float MoveFormationSlotCountMargin = 1.2f;
+
+	/** ReformTheLine = each unit takes the nearest free slot (spreads the group out). KeepFormation = rigid translation of the current arrangement, which cannot resolve an already clumped group. */
+	UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category = "RTS Movement Formation")
+	EFormationAssignmentMode MoveFormationAssignmentMode = EFormationAssignmentMode::ReformTheLine;
+
+	/** Innermost ring radius = slot pitch x this scale (the generator clamps it to >= pitch x 0.5). 0.5 is the compact default, whose 3-point inner ring is the single place where slots sit closer than the pitch (0.866 x pitch). Raising it to 1.0 leaves the center empty and puts 6 points at radius = pitch, so the real minimum spacing equals the pitch. */
+	UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category = "RTS Movement Formation", meta = (ClampMin = "0.5", ClampMax = "3.0", UIMax = "2.0"))
+	float MoveFormationInnerRadiusScale = 0.5f;
+
+	/** Hard lower bound (uu) on the distance between any two slots in the lattice. 0 = spacing derives from unit radius alone. When set, the pitch is inflated using the lattice's own chord geometry so the emitted slots really keep this distance — see MoveFormationInnerRadiusScale for the geometric factor. */
+	UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category = "RTS Movement Formation", meta = (ClampMin = "0.0", Units = "cm"))
+	float MoveFormationMinSlotSpacing = 0.0f;
 
 	/** Number of rows generated for the RTS unit selection grid page. */
 	UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category = "RTS Selection Panel", meta = (ClampMin = "1"))

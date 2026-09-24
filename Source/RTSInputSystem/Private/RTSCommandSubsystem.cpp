@@ -9,6 +9,7 @@
 #include "Tasks/MassBattleBPTaskAgentsMoveTo.h"
 #include "Tasks/MassBattleBPTaskAgentsChaseAttack.h"
 #include "FuncLibs/MassBattleFuncLib.h"
+#include "FuncLibs/MassBattleFormationAlgorithms.h"
 #include "Components/MassBattleAgentComponent.h"
 #include "Fragments/Attack.h"
 #include "Fragments/Move.h"
@@ -783,6 +784,141 @@ bool URTSCommandSubsystem::IssueMoveTo(UObject* WorldContext,
 	const TArray<URTSCommandSubsystem*> Owners = GetWorldCommandOwners(WorldContext);
 	URTSCommandSubsystem* QueueOwner = Cast<URTSCommandSubsystem>(WorldContext);
 	if (!QueueOwner && !Owners.IsEmpty()) QueueOwner = Owners[0];
+	// ‚îÄ‚îÄ Move-order formation: one deterministic slot per unit ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ
+	// Ordering a group to a single point is a normal RTS request (right-click a
+	// squad, rally to a flag). Sharing one goal point makes the Move layer's
+	// fixed arrival circle the only acceptance test, so once it is full the
+	// outer units can never enter it and orbit instead. Generating slots here
+	// removes the capacity problem at its source: each unit gets its own goal.
+	//
+	// Synchronous generation (GenerateCircularFormation ‚Üí GenerateCircularSlotPositions
+	// + AssignPositionsFromData). The async variant is deliberately not used: the
+	// command has to have Goal.Locations ready in the same frame it dispatches
+	// AgentsMoveTo. Determinism: no random offset and no ground/obstacle traces,
+	// so slots are a pure function of the selection's current state, the batch
+	// goal and these settings ‚Äî peers replaying the command derive the same slots.
+	const URTSInputPanelSettings* FormationSettings = RTSUnitTypeProtocol::GetSettings();
+	bool bUseFormation = FormationSettings && FormationSettings->bEnableMoveFormation
+		&& SelectedEntities.Num() > 1;
+
+	// Formation center is the batch goal. When every batch shares one center
+	// (the stock provider's behavior) a single global formation is generated:
+	// generating per batch would lay one ring per batch on the same center and
+	// overlap them. Distinct centers (custom providers) fall back to per-batch.
+	const FVector* FormationCenter = nullptr;
+	bool bSharedFormationCenter = true;
+	if (bUseFormation)
+	{
+		for (const FRTSMoveNavigationBatch& Batch : Batches)
+		{
+			if (Batch.Entities.IsEmpty()) continue;
+			if (!FormationCenter) { FormationCenter = &Batch.Goal; continue; }
+			if (!Batch.Goal.Equals(*FormationCenter, 1.0f))
+			{
+				bSharedFormationCenter = false;
+				break;
+			}
+		}
+		if (!FormationCenter) bUseFormation = false;
+	}
+
+	auto BuildFormationLocations = [&](const TArray<FEntityHandle>& Agents, const FVector& Center, TArray<FVector>& OutLocations) -> bool
+	{
+		OutLocations.Reset();
+		if (!FormationSettings || Agents.IsEmpty()) return false;
+
+		// Slot pitch comes from unit radius (same source as the Move layer's
+		// SelfRadius: Collider.Radius * Scale). Average rather than maximum: a
+		// couple of oversized units must not inflate the whole ring.
+		float RadiusSum = 0.f;
+		int32 RadiusCount = 0;
+		if (UMassAPISubsystem* FormationMA = UMassAPISubsystem::GetPtr(WorldContext))
+		{
+			for (const FEntityHandle& Agent : Agents)
+			{
+				const float Radius = UMassBattleFormationAlgorithms::ComputeAgentFormationRadius(
+					FormationMA, Agent, EAgentBoundMode::FromCollider, 1.f);
+				if (Radius > KINDA_SMALL_NUMBER)
+				{
+					RadiusSum += Radius;
+					RadiusCount++;
+				}
+			}
+		}
+		// No sampled radius (every handle stale) falls back to the framework's own
+		// default agent radius, so the pitch can never collapse to 0 ‚Äî which would
+		// stack every slot on one point.
+		const float AverageRadius = RadiusCount > 0
+			? RadiusSum / static_cast<float>(RadiusCount)
+			: 34.f;
+
+		FAgentSpawnPolygonShapeData ShapeData;
+		// The polar lattice's tightest pair distance is the INNER ring's chord, not
+		// the pitch: ring radius = pitch*k with n = round(2*pi*k) points, so the
+		// chord is 2*pitch*k*sin(pi/n). At the default k = 0.5 that is 0.866*pitch
+		// (3 points) ‚Äî the only place slots end up closer than the pitch; at
+		// k = 1.0 it becomes 6 points at radius = pitch and the dip disappears.
+		const float InnerRadiusScale = FMath::Clamp(FormationSettings->MoveFormationInnerRadiusScale, 0.5f, 3.f);
+		const int32 InnerRingPoints = FMath::Max(1, FMath::RoundToInt(2.f * UE_PI * InnerRadiusScale));
+		const float InnerChordFactor = InnerRingPoints > 1
+			? 2.f * InnerRadiusScale * FMath::Sin(UE_PI / static_cast<float>(InnerRingPoints))
+			: 1.f;
+		// Outer rings quantize their point count (round), which can shave ~2.5% off
+		// the chord, so the factor carries a safety margin.
+		constexpr float RingChordSafety = 0.97f;
+
+		float SlotPitch = 2.f * AverageRadius * FMath::Max(FormationSettings->MoveFormationSlotPitchScale, 1.f);
+		if (FormationSettings->MoveFormationMinSlotSpacing > 0.f)
+		{
+			// Invert the geometry: solve the pitch whose tightest chord equals the
+			// requested spacing, so the setting is a real lower bound rather than a
+			// nominal one.
+			const float RequiredPitch = FormationSettings->MoveFormationMinSlotSpacing
+				/ FMath::Max(InnerChordFactor * RingChordSafety, KINDA_SMALL_NUMBER);
+			SlotPitch = FMath::Max(SlotPitch, RequiredPitch);
+		}
+		ShapeData.InnerRadius = SlotPitch * InnerRadiusScale;
+		ShapeData.Spacing = FVector2D(SlotPitch, SlotPitch);
+		ShapeData.SectorAngle = 360.f;
+		ShapeData.Segments = 0;               // < 3 means circle
+		ShapeData.ShapeDirection = FVector::ForwardVector;
+		ShapeData.SlotCountMargin = FormationSettings->MoveFormationSlotCountMargin;
+		ShapeData.Offset = 0.f;               // determinism: no random offset
+		// Ground/obstacle types stay empty on purpose: the command path performs
+		// no traces, so terrain handling remains the Move layer's business.
+
+		UMassBattleFuncLib::GenerateCircularFormation(
+			WorldContext, Agents, Center, ShapeData,
+			FormationSettings->MoveFormationAssignmentMode, OutLocations,
+			EAgentBoundMode::FromCollider, 1.f);
+
+		// 1:1 contract: OutLocations is index-aligned with Agents, dropped ghosts
+		// scatter to the center. A mismatch means generation failed and the
+		// caller falls back to the shared batch goal.
+		return OutLocations.Num() == Agents.Num();
+	};
+
+	TArray<FVector> SharedFormationLocations;
+	TMap<FEntityHandle, FVector> SharedFormationByEntity;
+	if (bUseFormation && bSharedFormationCenter)
+	{
+		if (BuildFormationLocations(SelectedEntities, *FormationCenter, SharedFormationLocations))
+		{
+			SharedFormationByEntity.Reserve(SelectedEntities.Num());
+			for (int32 Index = 0; Index < SelectedEntities.Num(); ++Index)
+			{
+				SharedFormationByEntity.Add(SelectedEntities[Index], SharedFormationLocations[Index]);
+			}
+		}
+		else
+		{
+			bUseFormation = false;
+			UE_LOG(LogRTSCommand, Warning,
+				TEXT("Move formation generation failed for %d units; falling back to a shared goal."),
+				SelectedEntities.Num());
+		}
+	}
+
 	TArray<UMassBattleBPTaskAgentsMoveTo*> MoveTasks;
 	TArray<const FRTSMoveNavigationBatch*> TaskBatches;
 	FMBMoveFailCondition MoveFailCondition;
@@ -794,7 +930,29 @@ bool URTSCommandSubsystem::IssueMoveTo(UObject* WorldContext,
 		if (Batch.Entities.IsEmpty()) continue;
 		FMBMoveGoal Goal;
 		Goal.GoalType = EMBMoveGoalType::Location;
-		Goal.Locations.Init(Batch.Goal, Batch.Entities.Num());
+		if (bUseFormation && bSharedFormationCenter)
+		{
+			// Slots from the single global formation, looked up by handle so the
+			// batch's own filtering or ordering cannot shift the mapping.
+			Goal.Locations.Reserve(Batch.Entities.Num());
+			for (const FEntityHandle& Entity : Batch.Entities)
+			{
+				const FVector* Slot = SharedFormationByEntity.Find(Entity);
+				Goal.Locations.Add(Slot ? *Slot : Batch.Goal);
+			}
+		}
+		else if (bUseFormation)
+		{
+			// Distinct batch centers: one formation per batch around its own goal.
+			if (!BuildFormationLocations(Batch.Entities, Batch.Goal, Goal.Locations))
+			{
+				Goal.Locations.Init(Batch.Goal, Batch.Entities.Num());
+			}
+		}
+		else
+		{
+			Goal.Locations.Init(Batch.Goal, Batch.Entities.Num());
+		}
 		UE_LOG(LogRTSCommand, Log,
 			TEXT("Move command batch: Units=%d Navigation=%s Layer=%d"),
 			Batch.Entities.Num(), GetNavigationModeName(Batch.Navigation.Mode),
@@ -805,7 +963,7 @@ bool URTSCommandSubsystem::IssueMoveTo(UObject* WorldContext,
 		Viz.bDrawConnection = true;
 		Viz.bDrawGoalMarker = true;
 		Viz.Color = bCanInterrupt ? FColor::Blue : FColor::Green;
-		Viz.Duration = 1.f;               // »ŒŒÒ‘À––∆⁄º‰≥÷–¯ªÊ÷∆
+		Viz.Duration = 1.f;               // ‰ªªÂä°ËøêË°åÊúüÈó¥ÊåÅÁª≠ÁªòÂà∂
 		Viz.LineThickness = 0.f;
 		Viz.GoalMarkerRadius = 200.f;
 		if (UMassBattleBPTaskAgentsMoveTo* MoveTask = UMassBattleBPTaskAgentsMoveTo::AgentsMoveTo(
@@ -856,7 +1014,7 @@ bool URTSCommandSubsystem::IssueAttackTarget(UObject* WorldContext,
 	Viz.bDrawConnection = true;
 	Viz.bDrawGoalMarker = true;
 	Viz.Color = FColor::Red;
-	Viz.Duration = 1.f;               // »ŒŒÒ‘À––∆⁄º‰≥÷–¯ªÊ÷∆
+	Viz.Duration = 1.f;               // ‰ªªÂä°ËøêË°åÊúüÈó¥ÊåÅÁª≠ÁªòÂà∂
 	Viz.LineThickness = 0.f;
 	Viz.GoalMarkerRadius = 200.f;
 	if (UMassBattleBPTaskAgentsChaseAttack* ChaseTask = UMassBattleBPTaskAgentsChaseAttack::AgentsChaseAttack(
