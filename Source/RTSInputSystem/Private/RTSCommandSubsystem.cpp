@@ -965,7 +965,7 @@ bool URTSCommandSubsystem::IssueMoveTo(UObject* WorldContext,
 		Viz.Color = bCanInterrupt ? FColor::Blue : FColor::Green;
 		Viz.Duration = 1.f;               // 任务运行期间持续绘制
 		Viz.LineThickness = 0.f;
-		Viz.GoalMarkerRadius = 200.f;
+		Viz.GoalMarkerRadius = 100.f;
 		if (UMassBattleBPTaskAgentsMoveTo* MoveTask = UMassBattleBPTaskAgentsMoveTo::AgentsMoveTo(
 			WorldContext, Batch.Entities, Goal, Batch.Navigation, MoveFailCondition, bCanInterrupt, Viz))
 		{
@@ -1016,7 +1016,7 @@ bool URTSCommandSubsystem::IssueAttackTarget(UObject* WorldContext,
 	Viz.Color = FColor::Red;
 	Viz.Duration = 1.f;               // 任务运行期间持续绘制
 	Viz.LineThickness = 0.f;
-	Viz.GoalMarkerRadius = 200.f;
+	Viz.GoalMarkerRadius = 100.f;
 	if (UMassBattleBPTaskAgentsChaseAttack* ChaseTask = UMassBattleBPTaskAgentsChaseAttack::AgentsChaseAttack(
 		WorldContext, SelectedEntities, TargetHandle, bTargetBehaviorsCanInterrupt, ChaseFailCondition, Viz))
 	{
