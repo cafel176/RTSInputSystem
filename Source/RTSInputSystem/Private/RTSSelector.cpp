@@ -2,9 +2,9 @@
 
 #include "RTSSelector.h"
 
-#include "EnhancedInputComponent.h"
-#include "EnhancedInputSubsystems.h"
-#include "Engine/GameViewportClient.h"
+// 输入注册相关的头（EnhancedInputComponent / Subsystems、IInputProcessor、SlateApplication、
+// SlateUser、SViewport、SLeafWidget、DrawElements、GameViewportClient）随输入职责一起迁到了
+// RTSInputRouter.cpp；本文件只保留选择与命令逻辑所需的头。
 #include "Engine/LocalPlayer.h"
 #include "Engine/World.h"
 #include "EngineUtils.h"
@@ -15,8 +15,6 @@
 #include "RTSSelectionSubsystem.h"
 #include "RTSCamera.h"
 #include "Kismet/GameplayStatics.h"
-#include "UObject/ConstructorHelpers.h"
-#include "Components/InputComponent.h"
 #include "Blueprint/UserWidget.h"
 #include "Blueprint/WidgetBlueprintLibrary.h"
 #include "Blueprint/WidgetTree.h"
@@ -29,10 +27,6 @@
 #include "Components/MassBattleAgentComponent.h"
 #include "Blueprint/GameViewportSubsystem.h"
 #include "FuncLibs/MassBattleFuncLib.h"
-#include "Framework/Application/IInputProcessor.h"
-#include "Framework/Application/SlateApplication.h"
-#include "Framework/Application/SlateUser.h"
-#include "Widgets/SViewport.h"
 #include "Renderers/MassBattleFxRenderer.h"
 #include "Materials/MaterialInstanceDynamic.h"
 #include "Materials/MaterialInterface.h"
@@ -40,8 +34,6 @@
 #include "Engine/OverlapResult.h"
 #include "Engine/StaticMesh.h"
 #include "HAL/IConsoleManager.h"
-#include "Rendering/DrawElements.h"
-#include "Widgets/SLeafWidget.h"
 #include "Tasks/MassBattleBPTaskAgentsChaseAttack.h" // 直接对选中的实体发起追击攻击
 #include "MassBattleInputFuncLib.h"
 #include "VarSystem/MassBattleGlobalVarFunctionLibrary.h"
@@ -68,232 +60,11 @@ static TAutoConsoleVariable<int32> CVarRTSGroundCommandPulse(
 	TEXT("Event-submitted right-click ground marker. 0=off, 1=use project settings."),
 	ECVF_Default);
 
-class FRTSSelectorInputProcessor final : public IInputProcessor
-{
-public:
-	explicit FRTSSelectorInputProcessor(URTSSelector* InSelector)
-		: Selector(InSelector)
-	{
-	}
-
-	virtual void Tick(
-		const float DeltaTime,
-		FSlateApplication& SlateApp,
-		TSharedRef<ICursor> Cursor) override
-	{
-		// IInputProcessor requires Tick. Intentionally no business work here:
-		// selector feedback changes only in discrete input-event callbacks.
-		(void)DeltaTime;
-		(void)SlateApp;
-		(void)Cursor;
-	}
-
-	virtual bool HandleMouseMoveEvent(
-		FSlateApplication& SlateApp,
-		const FPointerEvent& MouseEvent) override
-	{
-		(void)SlateApp;
-		(void)MouseEvent;
-		if (URTSSelector* SelectorComponent = Selector.Get())
-		{
-			SelectorComponent->HandlePointerMoved();
-		}
-		return false;
-	}
-
-	virtual bool HandleKeyDownEvent(FSlateApplication& SlateApp, const FKeyEvent& KeyEvent) override
-	{
-		if (KeyEvent.GetKey() != EKeys::Tab || KeyEvent.IsShiftDown()
-			|| KeyEvent.IsControlDown() || KeyEvent.IsAltDown() || KeyEvent.IsCommandDown())
-		{
-			return false;
-		}
-		URTSSelector* SelectorComponent = Selector.Get();
-		APlayerController* PC = SelectorComponent ? SelectorComponent->PlayerController : nullptr;
-		ULocalPlayer* LocalPlayer = PC ? PC->GetLocalPlayer() : nullptr;
-		UGameViewportClient* ViewportClient = LocalPlayer ? LocalPlayer->ViewportClient : nullptr;
-		if (!ViewportClient || ViewportClient->IgnoreInput() || PC->IsPaused())
-		{
-			return false;
-		}
-		const TSharedPtr<FSlateUser> User = LocalPlayer->GetSlateUser();
-		const TSharedPtr<SViewport> Viewport = ViewportClient->GetGameViewportWidget();
-		if (!User || User->GetUserIndex() != KeyEvent.GetUserIndex()
-			|| !Viewport || !User->IsWidgetInFocusPath(Viewport))
-		{
-			// A PIE selector must not handle keys aimed at editor windows or another local player.
-			return false;
-		}
-		const TSharedPtr<SWidget> Focused = User->GetFocusedWidget();
-		if (Focused && Focused->GetTypeAsString().Contains(TEXT("EditableText")))
-		{
-			// Chat and text fields keep their own Tab handling.
-			return false;
-		}
-		if (URTSSelectionSubsystem* Selection = LocalPlayer->GetSubsystem<URTSSelectionSubsystem>())
-		{
-			// Selection owns Tab before Slate turns it into focus navigation. A held key stays consumed.
-			if (!KeyEvent.IsRepeat()) Selection->CycleGroup();
-			return true;
-		}
-		return false;
-	}
-
-	virtual const TCHAR* GetDebugName() const override
-	{
-		return TEXT("RTSSelectorInput");
-	}
-
-private:
-	TWeakObjectPtr<URTSSelector> Selector;
-};
+// 输入注册与路由（Slate 预处理器 FRTSSelectorInputProcessor、软件光标 SRTSStrategyCursor、
+// Enhanced Input 绑定、控制组热键）已迁到 RTSInputRouter.cpp。本文件只保留「被输入触达后做什么」。
 
 namespace
 {
-	enum class ERTSStrategyCursorStyle : uint8
-	{
-		Normal,
-		Selectable,
-		Targeting
-	};
-
-	class SRTSStrategyCursor final : public SLeafWidget
-	{
-	public:
-		SLATE_BEGIN_ARGS(SRTSStrategyCursor)
-			: _Style(ERTSStrategyCursorStyle::Normal)
-		{
-			_Visibility = EVisibility::HitTestInvisible;
-		}
-			SLATE_ARGUMENT(ERTSStrategyCursorStyle, Style)
-		SLATE_END_ARGS()
-
-		void Construct(const FArguments& InArgs)
-		{
-			Style = InArgs._Style;
-		}
-
-		virtual FVector2D ComputeDesiredSize(float) const override
-		{
-			// SViewport centers software cursor widgets on the actual cursor
-			// position. The pointer tip below is therefore drawn at this
-			// widget's exact center so selection rays and clicks land there.
-			return FVector2D(44.0f, 44.0f);
-		}
-
-		virtual int32 OnPaint(
-			const FPaintArgs& Args,
-			const FGeometry& AllottedGeometry,
-			const FSlateRect& MyCullingRect,
-			FSlateWindowElementList& OutDrawElements,
-			int32 LayerId,
-			const FWidgetStyle& InWidgetStyle,
-			bool bParentEnabled) const override
-		{
-			(void)Args;
-			(void)MyCullingRect;
-			(void)InWidgetStyle;
-			(void)bParentEnabled;
-
-			const FPaintGeometry PaintGeometry = AllottedGeometry.ToPaintGeometry();
-			const FVector2f Hotspot(22.0f, 22.0f);
-			const FLinearColor Accent =
-				Style == ERTSStrategyCursorStyle::Selectable
-					? FLinearColor(0.24f, 1.0f, 0.44f, 1.0f)
-					: (Style == ERTSStrategyCursorStyle::Targeting
-						? FLinearColor(1.0f, 0.34f, 0.10f, 1.0f)
-						: FLinearColor(0.78f, 0.90f, 0.98f, 1.0f));
-			const FLinearColor EdgeColor(0.015f, 0.025f, 0.045f, 0.98f);
-
-			// Compact asymmetric RTS pointer. The first/last point is the exact
-			// input hotspot; the body grows down-right like a conventional
-			// cursor without visually displacing the click point.
-			const TArray<FVector2f> Arrow =
-			{
-				Hotspot,
-				FVector2f(23.2f, 38.0f),
-				FVector2f(27.6f, 34.0f),
-				FVector2f(32.3f, 42.0f),
-				FVector2f(36.2f, 39.8f),
-				FVector2f(31.5f, 31.8f),
-				FVector2f(40.0f, 30.4f),
-				Hotspot
-			};
-			TArray<FVector2f> ShadowArrow;
-			ShadowArrow.Reserve(Arrow.Num());
-			for (const FVector2f& Point : Arrow)
-			{
-				ShadowArrow.Add(Point + FVector2f(1.25f, 1.5f));
-			}
-
-			FSlateDrawElement::MakeLines(
-				OutDrawElements,
-				LayerId,
-				PaintGeometry,
-				MoveTemp(ShadowArrow),
-				ESlateDrawEffect::None,
-				FLinearColor(0.0f, 0.0f, 0.0f, 0.72f),
-				true,
-				7.0f);
-			FSlateDrawElement::MakeLines(
-				OutDrawElements,
-				LayerId + 1,
-				PaintGeometry,
-				Arrow,
-				ESlateDrawEffect::None,
-				EdgeColor,
-				true,
-				5.5f);
-			FSlateDrawElement::MakeLines(
-				OutDrawElements,
-				LayerId + 2,
-				PaintGeometry,
-				Arrow,
-				ESlateDrawEffect::None,
-				Accent,
-				true,
-				2.7f);
-
-			if (Style != ERTSStrategyCursorStyle::Normal)
-			{
-				// Three restrained acquisition corners make the selectable
-				// state readable while leaving the down-right pointer body
-				// and its exact hotspot unobstructed.
-				const TArray<TArray<FVector2f>> AcquisitionCorners =
-				{
-					{ Hotspot + FVector2f(-5.0f, -10.0f), Hotspot + FVector2f(-10.0f, -10.0f), Hotspot + FVector2f(-10.0f, -5.0f) },
-					{ Hotspot + FVector2f(5.0f, -10.0f), Hotspot + FVector2f(10.0f, -10.0f), Hotspot + FVector2f(10.0f, -5.0f) },
-					{ Hotspot + FVector2f(-10.0f, 5.0f), Hotspot + FVector2f(-10.0f, 10.0f), Hotspot + FVector2f(-5.0f, 10.0f) }
-				};
-				for (const TArray<FVector2f>& Corner : AcquisitionCorners)
-				{
-					FSlateDrawElement::MakeLines(
-						OutDrawElements,
-						LayerId + 3,
-						PaintGeometry,
-						Corner,
-						ESlateDrawEffect::None,
-						EdgeColor,
-						true,
-						4.5f);
-					FSlateDrawElement::MakeLines(
-						OutDrawElements,
-						LayerId + 4,
-						PaintGeometry,
-						Corner,
-						ESlateDrawEffect::None,
-						Accent,
-						true,
-						1.8f);
-				}
-			}
-			return LayerId + 4;
-		}
-
-	private:
-		ERTSStrategyCursorStyle Style = ERTSStrategyCursorStyle::Normal;
-	};
-
 	const FName LegacyBuildPlacementSurfaceComponentName(TEXT("RTSHashGridSelectionSurface"));
 	const FName BuildPlacementFootprintComponentName(TEXT("RTSBuildPlacementFootprintCells"));
 	const FName BuildPlacementModelComponentName(TEXT("RTSBuildPlacementModel"));
@@ -780,20 +551,8 @@ URTSSelector::URTSSelector(): PlayerController(nullptr), HUD(nullptr), bIsSelect
 	PrimaryComponentTick.bCanEverTick = false;
 	PrimaryComponentTick.bStartWithTickEnabled = false;
 
-	// Add defaults for input actions
-	static ConstructorHelpers::FObjectFinder<UInputAction>
-		BeginSelectionActionFinder(TEXT("/RTSInputSystem/Inputs/BeginSelection"));
-	static ConstructorHelpers::FObjectFinder<UInputMappingContext>
-		InputMappingContextFinder(TEXT("/RTSInputSystem/Inputs/RTSInputSystemInputs"));
-	this->BeginSelection = BeginSelectionActionFinder.Object;
-	this->InputMappingContext = InputMappingContextFinder.Object;
-
-	static ConstructorHelpers::FObjectFinder<UInputAction>
-		IssueCommandActionFinder(TEXT("/RTSInputSystem/Inputs/IssueCommand"));
-	if (IssueCommandActionFinder.Succeeded())
-	{
-		this->IssueCommandAction = IssueCommandActionFinder.Object;
-	}
+	// 输入动作与映射上下文的默认资产（BeginSelection / IssueCommand / RTSInputSystemInputs）
+	// 已随输入职责一起迁到 URTSInputRouter 的构造函数。
 }
 
 
@@ -806,12 +565,7 @@ void URTSSelector::BeginPlay()
 	if (NetMode != NM_DedicatedServer)
 	{
 		this->CollectComponentDependencyReferences();
-		this->RegisterSelectionInputProcessor();
-		this->InstallStrategyMouseCursors();
 		this->EnsureSelectionFxRenderer();
-		this->BindInputMappingContext();
-		//this->BindInputActions();
-		//this->RegisterControlGroupHotkeys();
 		this->TryBindTopSelectButtons();
 		if (UGameViewportSubsystem* ViewportSubsystem =
 			UGameViewportSubsystem::Get())
@@ -901,9 +655,10 @@ void URTSSelector::EndPlay(const EEndPlayReason::Type EndPlayReason)
 		}
 		ViewportWidgetAddedDelegateHandle.Reset();
 	}
-	UnregisterSelectionInputProcessor();
 	ClearSelectableHoverPreview(false);
-	RestoreStrategyMouseCursors();
+
+	// 输入注册的拆除（Slate 预处理器、软件光标）由 URTSInputRouter::EndPlay 负责。
+	// 控制组热键沿用原行为：注册在 PlayerController 自带的 InputComponent 上，随 PC 一起销毁，不在此拆除。
 
 	if (PlayerController && PlayerController->GetLocalPlayer())
 	{
@@ -916,7 +671,6 @@ void URTSSelector::EndPlay(const EEndPlayReason::Type EndPlayReason)
 		}
 	}
 
-	//UnregisterControlGroupHotkeys();
 	UnbindTopSelectButtons();
 	ClearSelectedPathPreview();
 	ClearMoveCommandFeedback();
@@ -1146,30 +900,6 @@ void URTSSelector::SelectAllAirports() { SelectTopCategory(TEXT("RTS.Selection.S
 void URTSSelector::SelectAllBarracks() { SelectTopCategory(TEXT("RTS.Selection.Structure.Barracks")); }
 void URTSSelector::SelectAllMilitaryCamps() { SelectTopCategory(TEXT("RTS.Selection.Structure.MilitaryCamp")); }
 
-void URTSSelector::RegisterSelectionInputProcessor()
-{
-	if (SelectionInputProcessor.IsValid()
-		|| !FSlateApplication::IsInitialized())
-	{
-		return;
-	}
-	SelectionInputProcessor =
-		MakeShared<FRTSSelectorInputProcessor>(this);
-	FSlateApplication::Get().RegisterInputPreProcessor(
-		SelectionInputProcessor);
-}
-
-void URTSSelector::UnregisterSelectionInputProcessor()
-{
-	if (SelectionInputProcessor.IsValid()
-		&& FSlateApplication::IsInitialized())
-	{
-		FSlateApplication::Get().UnregisterInputPreProcessor(
-			SelectionInputProcessor);
-	}
-	SelectionInputProcessor.Reset();
-}
-
 void URTSSelector::HandlePointerMoved()
 {
 	if (!PlayerController)
@@ -1288,168 +1018,6 @@ void URTSSelector::CollectComponentDependencyReferences()
 	}
 }
 
-void URTSSelector::SetupPlayerInputComponent(UInputComponent* PlayerInputComponent)
-{
-	if (const auto InputComponent = Cast<UEnhancedInputComponent>(PlayerInputComponent))
-	{
-		InputComponent->BindAction(this->BeginSelection, ETriggerEvent::Started, this, &URTSSelector::OnSelectionStart);
-		InputComponent->BindAction(this->BeginSelection, ETriggerEvent::Triggered, this, &URTSSelector::OnUpdateSelection);
-		InputComponent->BindAction(this->BeginSelection, ETriggerEvent::Completed, this, &URTSSelector::OnSelectionEnd);
-		InputComponent->BindAction(this->BeginSelection, ETriggerEvent::Canceled, this, &URTSSelector::OnSelectionEnd);
-		if (this->IssueCommandAction)
-		{
-			InputComponent->BindAction(this->IssueCommandAction, ETriggerEvent::Started, this, &URTSSelector::OnIssueCommand);
-		}
-
-		RegisterControlGroupHotkeys(InputComponent);
-	}
-}
-
-void URTSSelector::BindInputActions()
-{
-	if (!PlayerController || !BeginSelection)
-	{
-		UE_LOG(LogTemp, Warning, TEXT("[RTSSelector] Selection input was not bound because the player controller or input action is unavailable."));
-		return;
-	}
-
-	if (const auto EnhancedInputComponent = Cast<UEnhancedInputComponent>(this->PlayerController->InputComponent))
-	{
-		EnhancedInputComponent->BindAction(
-			this->BeginSelection,
-			ETriggerEvent::Started,
-			this,
-			&URTSSelector::OnSelectionStart
-		);
-
-		EnhancedInputComponent->BindAction(
-			this->BeginSelection,
-			ETriggerEvent::Completed,
-			this,
-			&URTSSelector::OnSelectionEnd
-		);
-
-		EnhancedInputComponent->BindAction(
-			this->BeginSelection,
-			ETriggerEvent::Canceled,
-			this,
-			&URTSSelector::OnSelectionEnd
-		);
-
-		if (!this->IssueCommandAction)
-		{
-			// Dynamically load it in case the CDO failed to find it during editor startup
-			this->IssueCommandAction = Cast<UInputAction>(StaticLoadObject(UInputAction::StaticClass(), nullptr, TEXT("/Script/EnhancedInput.InputAction'/RTSInputSystem/Inputs/IssueCommand.IssueCommand'")));
-		}
-
-		if (this->IssueCommandAction)
-		{
-			UE_LOG(LogTemp, Warning, TEXT("[RTSSelector] IssueCommandAction BOUND SUCCESSFULLY!"));
-			EnhancedInputComponent->BindAction(
-				this->IssueCommandAction,
-				ETriggerEvent::Started,
-				this,
-				&URTSSelector::OnIssueCommand
-			);
-		}
-		else
-		{
-			UE_LOG(LogTemp, Error, TEXT("[RTSSelector] IssueCommandAction is NULL! Ensure it exists at /RTSInputSystem/Inputs/IssueCommand"));
-		}
-	}
-}
-
-void URTSSelector::RegisterControlGroupHotkeys(UInputComponent* InputComponent)
-{
-	if (!InputComponent)
-	{
-		const URTSInputPanelSettings* Settings = GetDefault<URTSInputPanelSettings>();
-		if (!PlayerController || !PlayerController->InputComponent || (Settings && !Settings->bEnableControlGroupHotkeys))
-		{
-			return;
-		}
-
-		UnregisterControlGroupHotkeys();
-	}
-
-	UWorld* InputWorld = GetWorld();
-	if (!InputWorld)
-	{
-		return;
-	}
-
-	if (InputComponent)
-	{
-		ControlGroupInputComponent = InputComponent;
-	}
-	else
-	{
-		ControlGroupInputComponent = NewObject<UInputComponent>(PlayerController);
-		if (!ControlGroupInputComponent)
-		{
-			return;
-		}
-
-		ControlGroupInputComponent->Priority = 10;
-		ControlGroupInputComponent->bBlockInput = false;
-		ControlGroupInputComponent->RegisterComponentWithWorld(InputWorld);
-		PlayerController->PushInputComponent(ControlGroupInputComponent);
-		ControlGroupInputOwner = PlayerController;
-	}
-
-	const FKey NumberKeys[] =
-	{
-		EKeys::Zero, EKeys::One, EKeys::Two, EKeys::Three, EKeys::Four,
-		EKeys::Five, EKeys::Six, EKeys::Seven, EKeys::Eight, EKeys::Nine
-	};
-	const FKey NumpadKeys[] =
-	{
-		EKeys::NumPadZero, EKeys::NumPadOne, EKeys::NumPadTwo, EKeys::NumPadThree, EKeys::NumPadFour,
-		EKeys::NumPadFive, EKeys::NumPadSix, EKeys::NumPadSeven, EKeys::NumPadEight, EKeys::NumPadNine
-	};
-
-	auto AddBinding = [this](const FKey& Key, int32 GroupIndex, bool bShift, bool bControl, bool bAlt)
-	{
-		FInputKeyBinding Binding(FInputChord(Key, bShift, bControl, bAlt, false), IE_Pressed);
-		Binding.bConsumeInput = true;
-		Binding.KeyDelegate.GetDelegateForManualSet().BindLambda([WeakThis = TWeakObjectPtr<URTSSelector>(this), GroupIndex]()
-		{
-			if (URTSSelector* Selector = WeakThis.Get())
-			{
-				Selector->HandleControlGroupHotkey(GroupIndex);
-			}
-		});
-		ControlGroupInputComponent->KeyBindings.Add(MoveTemp(Binding));
-	};
-
-	for (int32 GroupIndex = 0; GroupIndex <= 9; ++GroupIndex)
-	{
-		for (const FKey Key : { NumberKeys[GroupIndex], NumpadKeys[GroupIndex] })
-		{
-			AddBinding(Key, GroupIndex, false, false, false);
-			AddBinding(Key, GroupIndex, false, true, false);
-			AddBinding(Key, GroupIndex, true, false, false);
-			AddBinding(Key, GroupIndex, false, false, true);
-		}
-	}
-}
-
-void URTSSelector::UnregisterControlGroupHotkeys()
-{
-	if (!ControlGroupInputComponent)
-	{
-		return;
-	}
-
-	if (ControlGroupInputOwner.IsValid())
-	{
-		ControlGroupInputOwner->PopInputComponent(ControlGroupInputComponent);
-	}
-	ControlGroupInputComponent->DestroyComponent();
-	ControlGroupInputComponent = nullptr;
-	ControlGroupInputOwner.Reset();
-}
-
 void URTSSelector::HandleControlGroupHotkey(int32 GroupIndex)
 {
 	if (!PlayerController || !PlayerController->GetLocalPlayer())
@@ -1502,79 +1070,8 @@ void URTSSelector::HandleControlGroupHotkey(int32 GroupIndex)
 	LastControlGroupRecallTime = CurrentTime;
 }
 
-void URTSSelector::BindInputMappingContext()
-{
-	if (PlayerController && PlayerController->GetLocalPlayer())
-	{
-		if (const auto Input = PlayerController->GetLocalPlayer()->GetSubsystem<UEnhancedInputLocalPlayerSubsystem>())
-		{
-			PlayerController->bShowMouseCursor = true;
-
-			// Keep camera, UI, and project-level contexts that may already be active.
-			if (!Input->HasMappingContext(this->InputMappingContext))
-			{
-				Input->AddMappingContext(this->InputMappingContext, 0);
-			}
-		}
-	}
-}
-
-void URTSSelector::InstallStrategyMouseCursors()
-{
-	const URTSInputPanelSettings* Settings = GetDefault<URTSInputPanelSettings>();
-	ULocalPlayer* LocalPlayer = PlayerController
-		? PlayerController->GetLocalPlayer()
-		: nullptr;
-	UGameViewportClient* ViewportClient = LocalPlayer
-		? LocalPlayer->ViewportClient
-		: nullptr;
-	if (!Settings
-		|| !Settings->bEnableStrategyMouseCursor
-		|| !ViewportClient)
-	{
-		return;
-	}
-
-	// 启用软件光标并为三种状态设置 RTS 指针。
-	ViewportClient->SetUseSoftwareCursorWidgets(true);
-	ViewportClient->SetSoftwareCursorWidget(
-		EMouseCursor::Default,
-		SNew(SRTSStrategyCursor)
-		.Style(ERTSStrategyCursorStyle::Normal));
-	ViewportClient->SetSoftwareCursorWidget(
-		EMouseCursor::GrabHand,
-		SNew(SRTSStrategyCursor)
-		.Style(ERTSStrategyCursorStyle::Selectable));
-	ViewportClient->SetSoftwareCursorWidget(
-		EMouseCursor::Crosshairs,
-		SNew(SRTSStrategyCursor)
-		.Style(ERTSStrategyCursorStyle::Targeting));
-
-	PlayerController->DefaultMouseCursor = EMouseCursor::Default;
-	PlayerController->CurrentMouseCursor = EMouseCursor::Default;
-}
-
-void URTSSelector::RestoreStrategyMouseCursors()
-{
-	ULocalPlayer* LocalPlayer = PlayerController
-		? PlayerController->GetLocalPlayer()
-		: nullptr;
-	if (UGameViewportClient* ViewportClient =
-		LocalPlayer ? LocalPlayer->ViewportClient : nullptr)
-	{
-		// 清空三种状态的软件光标并重建。
-		ViewportClient->SetSoftwareCursorWidget(
-			EMouseCursor::Default,
-			TSharedPtr<SWidget>());
-		ViewportClient->SetSoftwareCursorWidget(
-			EMouseCursor::GrabHand,
-			TSharedPtr<SWidget>());
-		ViewportClient->SetSoftwareCursorWidget(
-			EMouseCursor::Crosshairs,
-			TSharedPtr<SWidget>());
-		ViewportClient->RebuildCursors();
-	}
-}
+// BindInputMappingContext / InstallStrategyMouseCursors / RestoreStrategyMouseCursors
+// 已迁到 RTSInputRouter.cpp（它们注册的是输入与光标，不是选择逻辑）。
 
 void URTSSelector::ClearSelectableHoverPreview(
 	const bool bRestoreDefaultCursor)

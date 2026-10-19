@@ -5,7 +5,6 @@
 #include <CoreMinimal.h>
 #include "GameplayTagContainer.h"
 #include "InputAction.h"
-#include "InputMappingContext.h"
 #include "RTSHUD.h"
 #include "RTSSelectable.h"
 #include "RTSSelectionStructs.h"
@@ -14,8 +13,6 @@
 #include "RTSSelector.generated.h"
 
 class AActor;
-class FRTSSelectorInputProcessor;
-class IInputProcessor;
 class ULocalPlayer;
 class UStaticMesh;
 class URTSSelectable;
@@ -65,21 +62,23 @@ public:
 	/** Re-evaluates hover or placement state after the camera moves beneath a stationary pointer. */
 	void RefreshPointerWorldState(const FVector2D& ScreenPosition);
 
+	/**
+	 * 处理一次全局鼠标移动（由 URTSInputRouter 的 Slate 预处理器转发）。
+	 * 拖框时刷新框选；否则把指针转给相机帧驱动或刷新悬停预览。
+	 */
+	void HandlePointerMoved();
+
+	/** 处理一次控制组热键（0-9，由 URTSInputRouter 的输入绑定转发）。 */
+	void HandleControlGroupHotkey(int32 GroupIndex);
+
 	// BlueprintAssignable allows binding in Blueprints
 	DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnActorsSelected, const TArray<AActor*>&, SelectedActors);
 	UPROPERTY(BlueprintAssignable)
 	FOnActorsSelected OnActorsSelected;
 
 	// BlueprintReadWrite allows access and modification in Blueprints
-	UPROPERTY(BlueprintReadWrite, EditAnywhere, Category = "RTSCamera - Inputs")
-	UInputMappingContext* InputMappingContext;
-
-	UPROPERTY(BlueprintReadWrite, EditAnywhere, Category = "RTSCamera - Inputs")
-	UInputAction* BeginSelection;
-
-	// Action for right clicking to issue a smart command
-	UPROPERTY(BlueprintReadWrite, EditAnywhere, Category = "RTSCamera - Inputs")
-	UInputAction* IssueCommandAction;
+	// NOTE: 输入相关的动作/映射上下文（BeginSelection / IssueCommandAction / InputMappingContext）
+	// 已随输入职责一起迁到 URTSInputRouter。
 
 	// --- Targeting State (for Targeted Commands like Move/Attack) ---
 	UPROPERTY(BlueprintReadWrite, Category = "RTSCamera - Selection")
@@ -105,12 +104,6 @@ public:
 	/** Commits the active location-capable command at an explicit world point, such as a minimap click. */
 	UFUNCTION(BlueprintCallable, Category = "RTSCamera - Selection")
 	bool CommitPendingTargetingAtWorldLocation(FVector WorldLocation);
-
-	void OnIssueCommand_Outer()
-	{
-		FInputActionValue Value;
-		OnIssueCommand(Value);
-	}
 
 	// Input Action handler for Right Click
 	UFUNCTION(BlueprintCallable, Category = "RTSCamera - Selection")
@@ -170,18 +163,11 @@ public:
 	UFUNCTION(BlueprintPure, Category = "RTSCamera - Hash Grid Selection")
 	bool IsHashGridSelectionActive() const { return bIsHashGridSelecting; }
 
-	void SetupPlayerInputComponent_Outer(UInputComponent* PlayerInputComponent)
-	{
-		SetupPlayerInputComponent(PlayerInputComponent);
-	}
-
 protected:
 	virtual void BeginPlay() override;
 	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
-	virtual void SetupPlayerInputComponent(UInputComponent* PlayerInputComponent);
 
 private:
-	friend class FRTSSelectorInputProcessor;
 #if WITH_DEV_AUTOMATION_TESTS
 	friend class FWinyunqSelectionTabInputTest;
 #endif
@@ -199,10 +185,6 @@ private:
 	UPROPERTY(Transient)
 	TObjectPtr<AActor> BuildPlacementPreviewActor;
 
-	UPROPERTY(Transient)
-	TObjectPtr<class UInputComponent> ControlGroupInputComponent;
-
-	TWeakObjectPtr<APlayerController> ControlGroupInputOwner;
 	TWeakObjectPtr<class UUserWidget> BoundTopSelectWidget;
 
 	FVector2D SelectionStart;
@@ -249,22 +231,13 @@ private:
 	double LastControlGroupRecallTime = -1.0;
 	FDelegateHandle CommandFeedbackDelegateHandle;
 	FDelegateHandle ViewportWidgetAddedDelegateHandle;
-	TSharedPtr<IInputProcessor> SelectionInputProcessor;
 
-	void BindInputActions();
-	void BindInputMappingContext();
-	void RegisterSelectionInputProcessor();
-	void UnregisterSelectionInputProcessor();
-	void HandlePointerMoved();
+	// 输入注册/拆除（Slate 预处理器、Enhanced Input、软件光标、控制组热键）已迁到 URTSInputRouter；
+	// 本类只保留「被输入触达后做什么」的处理函数，且不再持有输入相关的成员。
 	void UpdateSelectionAtScreenPosition(const FVector2D& ScreenPosition);
-	void InstallStrategyMouseCursors();
-	void RestoreStrategyMouseCursors();
 	void UpdateSelectableHoverPreview(const FVector2D& ScreenPosition);
 	void ClearSelectableHoverPreview(bool bRestoreDefaultCursor);
 	void EnsureSelectionFxRenderer();
-	void RegisterControlGroupHotkeys(UInputComponent* InputComponent);
-	void UnregisterControlGroupHotkeys();
-	void HandleControlGroupHotkey(int32 GroupIndex);
 	void TryBindTopSelectButtons();
 	void UnbindTopSelectButtons();
 	void BindTopSelectButton(FName WidgetName, FName HandlerName);

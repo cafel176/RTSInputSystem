@@ -28,6 +28,7 @@ public class RTSInputSystem : ModuleRules
 				"DeveloperSettings",
 				"Engine",
 				"AIModule",
+				"NavigationSystem", // UNavigationSystemV1 / ANavigationData：导航测试组件做通路检查
 				"EnhancedInput",
 				"GameplayTags",
 				"InputCore",
