@@ -71,6 +71,23 @@ public:
 	/** 本组件的宿主 PlayerController（即 Owner）；未就绪时为 null。 */
 	APlayerController* GetPlayerController() const;
 
+	// ── Slate 预处理器转发的输入（全局鼠标移动 / Tab） ───────────────────────────────────────
+	//
+	// FRTSSelectorInputProcessor 只在 Slate 层负责「识别事件」与「否决不该处理的情况」（视口焦点、
+	// 文本输入框等）；识别通过之后统一交给下面两个入口，由本类按 ERTSInputMode 决定转给谁。
+	// 这样鼠标左右键（Enhanced Input）与鼠标移动 / Tab（Slate 预处理器）走的是同一套分发。
+
+	/** 一次全局鼠标移动。实体操纵状态转给 selector，导航测试状态暂留空。 */
+	void HandlePointerMoved();
+
+	/**
+	 * Tab（选择分组循环）。实体操纵状态转给选择子系统的 CycleGroup 并消费掉；
+	 * 其余状态不消费（交还 Slate 的默认焦点导航）。
+	 *
+	 * bIsRepeat 为按住后的重复触发：此时只消费、不切组，避免按住 Tab 连续跳组。
+	 */
+	bool HandleKeyDown(FKey key,bool isShiftDown,bool isCtrlDown,bool isAltDown,bool isCommandDown, bool bIsRepeat);
+
 	// ── 输入状态 ────────────────────────────────────────────────────────────────────────────
 
 	/** 当前输入状态。鼠标左右键的响应按它分发。 */
@@ -169,6 +186,22 @@ private:
 	void HandleNavigationTestRightPressed(const FInputActionValue& Value);
 	void HandleNavigationTestRightTriggered(const FInputActionValue& Value);
 	void HandleNavigationTestRightReleased(const FInputActionValue& Value);
+
+	// ── Slate 预处理器事件的按状态分发目标 ──────────────────────────────────────────────────
+	//
+	// 与上面的鼠标左右键处理同构：每个入口内部按 ERTSInputMode 分发给对应状态的处理函数。
+
+	/** 实体操纵状态下的鼠标移动：转发给 selector 的 HandlePointerMoved()。 */
+	void HandleEntityManipulationPointerMoved();
+
+	/** 导航测试状态下的鼠标移动：暂留空（占位）。 */
+	void HandleNavigationTestPointerMoved();
+
+	/** 实体操纵状态下的 Tab：转发给选择子系统的 CycleGroup 并消费。 */
+	bool HandleEntityManipulationCycleGroup(FKey key, bool isShiftDown, bool isCtrlDown, bool isAltDown, bool isCommandDown, bool bIsRepeat);
+
+	/** 导航测试状态下的 Tab：不消费，交还 Slate。 */
+	bool HandleNavigationTestCycleGroup(bool bIsRepeat);
 
 private:
 	/** 本组件创建并托管的 selector。Owner 是 PlayerController，所以外部 FindComponentByClass 仍可发现它。 */

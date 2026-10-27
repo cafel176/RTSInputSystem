@@ -2,6 +2,7 @@
 
 #include "RTSMinimalHUD.h"
 
+#include "RTSMinimalPlayerController.h"
 #include "RTSInputRouter.h"
 #include "UI/RTSActiveGroupWidget.h"
 #include "UI/RTSCommanderGridWidget.h"
@@ -225,35 +226,6 @@ void ARTSMinimalHUD::BeginPlay()
 	{
 		MinimalHUDWidget->AddToViewport(0);
 	}
-}
-
-ARTSMinimalPlayerController::ARTSMinimalPlayerController()
-{
-	bShowMouseCursor = true;
-	bEnableClickEvents = true;
-	bEnableMouseOverEvents = true;
-	RTSInputRouter = CreateDefaultSubobject<URTSInputRouter>(TEXT("RTSInputRouter"));
-}
-
-void ARTSMinimalPlayerController::SetNavigationTestActive(bool bActive)
-{
-	if (RTSInputRouter)
-	{
-		RTSInputRouter->SetNavigationTestActive(bActive);
-	}
-}
-
-void ARTSMinimalPlayerController::ToggleNavigationTest()
-{
-	if (RTSInputRouter)
-	{
-		RTSInputRouter->ToggleNavigationTest();
-	}
-}
-
-bool ARTSMinimalPlayerController::IsNavigationTestActive() const
-{
-	return RTSInputRouter && RTSInputRouter->IsNavigationTestActive();
 }
 
 ARTSMinimalGameMode::ARTSMinimalGameMode()

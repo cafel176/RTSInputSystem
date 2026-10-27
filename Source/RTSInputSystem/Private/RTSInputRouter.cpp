@@ -6,6 +6,7 @@
 #include "RTSNavigationTestComponent.h"
 #include "RTSInputPanelSettings.h"
 #include "RTSSelectionSubsystem.h"
+#include "RTSStrategyCursor.h"
 
 #include "EnhancedInputComponent.h"
 #include "EnhancedInputSubsystems.h"
@@ -19,8 +20,7 @@
 #include "Framework/Application/SlateApplication.h"
 #include "Framework/Application/SlateUser.h"
 #include "Widgets/SViewport.h"
-#include "Rendering/DrawElements.h"
-#include "Widgets/SLeafWidget.h"
+#include "RTSMinimalPlayerController.h"
 
 //——————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————//
 // Slate 输入预处理器：全局鼠标移动与 Tab
@@ -28,10 +28,11 @@
 
 /**
  * 挂在 Slate 上的输入预处理器。作用两个：
- *   - HandleMouseMoveEvent：把全局鼠标移动转给 selector 的 HandlePointerMoved()。
- *     恒返回 false（不消费），这是刻意的——相机与 UMG 控件仍要收到同一条移动事件。
- *   - HandleKeyDownEvent：接管 Tab（选择分组循环）。返回 true 表示消费掉，
- *     避免 Slate 把 Tab 变成焦点导航。
+ *   - HandleMouseMoveEvent：把全局鼠标移动交给 router 的 HandlePointerMoved()，由 router 按
+ *     ERTSInputMode 分发。恒返回 false（不消费），这是刻意的——相机与 UMG 控件仍要收到同一条移动事件。
+ *   - HandleKeyDownEvent：接管 Tab（选择分组循环）。处理器只做 Slate 层的「否决」判断
+ *     （视口焦点、文本输入框等），通过之后交给 router 的 HandleCycleSelectionGroup() 按状态分发；
+ *     router 返回 true 表示消费掉，避免 Slate 把 Tab 变成焦点导航。
  *
  * 持 TWeakObjectPtr 而不是裸指针：预处理器挂在 SlateApplication 上，其生命周期可能长于组件，
  * 弱引用 + 每次 Get() 判空是防止组件先销毁后访问的护栏。
@@ -64,10 +65,7 @@ public:
 		(void)MouseEvent;
 		if (URTSInputRouter* RouterPtr = Router.Get())
 		{
-			if (URTSSelector* SelectorComponent = RouterPtr->GetSelector())
-			{
-				SelectorComponent->HandlePointerMoved();
-			}
+			RouterPtr->HandlePointerMoved();
 		}
 		return false;
 	}
@@ -75,18 +73,14 @@ public:
 	virtual bool HandleKeyDownEvent(FSlateApplication& SlateApp, const FKeyEvent& KeyEvent) override
 	{
 		(void)SlateApp;
-		if (KeyEvent.GetKey() != EKeys::Tab || KeyEvent.IsShiftDown()
-			|| KeyEvent.IsControlDown() || KeyEvent.IsAltDown() || KeyEvent.IsCommandDown())
-		{
-			return false;
-		}
+		
 		URTSInputRouter* RouterPtr = Router.Get();
 		APlayerController* PC = RouterPtr ? RouterPtr->GetPlayerController() : nullptr;
 		ULocalPlayer* LocalPlayer = PC ? PC->GetLocalPlayer() : nullptr;
 		UGameViewportClient* ViewportClient = LocalPlayer ? LocalPlayer->ViewportClient : nullptr;
 		if (!ViewportClient || ViewportClient->IgnoreInput() || PC->IsPaused())
 		{
-			return false;
+			return false;		//忽略输入或暂停时，不响应
 		}
 		const TSharedPtr<FSlateUser> User = LocalPlayer->GetSlateUser();
 		const TSharedPtr<SViewport> Viewport = ViewportClient->GetGameViewportWidget();
@@ -94,21 +88,17 @@ public:
 			|| !Viewport || !User->IsWidgetInFocusPath(Viewport))
 		{
 			// A PIE selector must not handle keys aimed at editor windows or another local player.
-			return false;
+			return false;		//非当前用户，或不在当前ViewPort时不响应
 		}
 		const TSharedPtr<SWidget> Focused = User->GetFocusedWidget();
 		if (Focused && Focused->GetTypeAsString().Contains(TEXT("EditableText")))
 		{
 			// Chat and text fields keep their own Tab handling.
-			return false;
+			return false;			//焦点输入框中不响应
 		}
-		if (URTSSelectionSubsystem* Selection = LocalPlayer->GetSubsystem<URTSSelectionSubsystem>())
-		{
-			// Selection owns Tab before Slate turns it into focus navigation. A held key stays consumed.
-			if (!KeyEvent.IsRepeat()) Selection->CycleGroup();
-			return true;
-		}
-		return false;
+		
+		return RouterPtr && RouterPtr->HandleKeyDown(KeyEvent.GetKey(), KeyEvent.IsShiftDown(), KeyEvent.IsControlDown(),
+			KeyEvent.IsAltDown() , KeyEvent.IsCommandDown(),KeyEvent.IsRepeat());
 	}
 
 	virtual const TCHAR* GetDebugName() const override
@@ -119,157 +109,6 @@ public:
 private:
 	TWeakObjectPtr<URTSInputRouter> Router;
 };
-
-//——————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————//
-// 软件光标
-//——————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————//
-
-namespace
-{
-	enum class ERTSStrategyCursorStyle : uint8
-	{
-		Normal,
-		Selectable,
-		Targeting
-	};
-
-	class SRTSStrategyCursor final : public SLeafWidget
-	{
-	public:
-		SLATE_BEGIN_ARGS(SRTSStrategyCursor)
-			: _Style(ERTSStrategyCursorStyle::Normal)
-		{
-			_Visibility = EVisibility::HitTestInvisible;
-		}
-			SLATE_ARGUMENT(ERTSStrategyCursorStyle, Style)
-		SLATE_END_ARGS()
-
-		void Construct(const FArguments& InArgs)
-		{
-			Style = InArgs._Style;
-		}
-
-		virtual FVector2D ComputeDesiredSize(float) const override
-		{
-			// SViewport centers software cursor widgets on the actual cursor
-			// position. The pointer tip below is therefore drawn at this
-			// widget's exact center so selection rays and clicks land there.
-			return FVector2D(44.0f, 44.0f);
-		}
-
-		virtual int32 OnPaint(
-			const FPaintArgs& Args,
-			const FGeometry& AllottedGeometry,
-			const FSlateRect& MyCullingRect,
-			FSlateWindowElementList& OutDrawElements,
-			int32 LayerId,
-			const FWidgetStyle& InWidgetStyle,
-			bool bParentEnabled) const override
-		{
-			(void)Args;
-			(void)MyCullingRect;
-			(void)InWidgetStyle;
-			(void)bParentEnabled;
-
-			const FPaintGeometry PaintGeometry = AllottedGeometry.ToPaintGeometry();
-			const FVector2f Hotspot(22.0f, 22.0f);
-			const FLinearColor Accent =
-				Style == ERTSStrategyCursorStyle::Selectable
-					? FLinearColor(0.24f, 1.0f, 0.44f, 1.0f)
-					: (Style == ERTSStrategyCursorStyle::Targeting
-						? FLinearColor(1.0f, 0.34f, 0.10f, 1.0f)
-						: FLinearColor(0.78f, 0.90f, 0.98f, 1.0f));
-			const FLinearColor EdgeColor(0.015f, 0.025f, 0.045f, 0.98f);
-
-			// Compact asymmetric RTS pointer. The first/last point is the exact
-			// input hotspot; the body grows down-right like a conventional
-			// cursor without visually displacing the click point.
-			const TArray<FVector2f> Arrow =
-			{
-				Hotspot,
-				FVector2f(23.2f, 38.0f),
-				FVector2f(27.6f, 34.0f),
-				FVector2f(32.3f, 42.0f),
-				FVector2f(36.2f, 39.8f),
-				FVector2f(31.5f, 31.8f),
-				FVector2f(40.0f, 30.4f),
-				Hotspot
-			};
-			TArray<FVector2f> ShadowArrow;
-			ShadowArrow.Reserve(Arrow.Num());
-			for (const FVector2f& Point : Arrow)
-			{
-				ShadowArrow.Add(Point + FVector2f(1.25f, 1.5f));
-			}
-
-			FSlateDrawElement::MakeLines(
-				OutDrawElements,
-				LayerId,
-				PaintGeometry,
-				MoveTemp(ShadowArrow),
-				ESlateDrawEffect::None,
-				FLinearColor(0.0f, 0.0f, 0.0f, 0.72f),
-				true,
-				7.0f);
-			FSlateDrawElement::MakeLines(
-				OutDrawElements,
-				LayerId + 1,
-				PaintGeometry,
-				Arrow,
-				ESlateDrawEffect::None,
-				EdgeColor,
-				true,
-				5.5f);
-			FSlateDrawElement::MakeLines(
-				OutDrawElements,
-				LayerId + 2,
-				PaintGeometry,
-				Arrow,
-				ESlateDrawEffect::None,
-				Accent,
-				true,
-				2.7f);
-
-			if (Style != ERTSStrategyCursorStyle::Normal)
-			{
-				// Three restrained acquisition corners make the selectable
-				// state readable while leaving the down-right pointer body
-				// and its exact hotspot unobstructed.
-				const TArray<TArray<FVector2f>> AcquisitionCorners =
-				{
-					{ Hotspot + FVector2f(-5.0f, -10.0f), Hotspot + FVector2f(-10.0f, -10.0f), Hotspot + FVector2f(-10.0f, -5.0f) },
-					{ Hotspot + FVector2f(5.0f, -10.0f), Hotspot + FVector2f(10.0f, -10.0f), Hotspot + FVector2f(10.0f, -5.0f) },
-					{ Hotspot + FVector2f(-10.0f, 5.0f), Hotspot + FVector2f(-10.0f, 10.0f), Hotspot + FVector2f(-5.0f, 10.0f) }
-				};
-				for (const TArray<FVector2f>& Corner : AcquisitionCorners)
-				{
-					FSlateDrawElement::MakeLines(
-						OutDrawElements,
-						LayerId + 3,
-						PaintGeometry,
-						Corner,
-						ESlateDrawEffect::None,
-						EdgeColor,
-						true,
-						4.5f);
-					FSlateDrawElement::MakeLines(
-						OutDrawElements,
-						LayerId + 4,
-						PaintGeometry,
-						Corner,
-						ESlateDrawEffect::None,
-						Accent,
-						true,
-						1.8f);
-				}
-			}
-			return LayerId + 4;
-		}
-
-	private:
-		ERTSStrategyCursorStyle Style = ERTSStrategyCursorStyle::Normal;
-	};
-}
 
 //——————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————//
 // 组件生命周期
@@ -574,6 +413,14 @@ void URTSInputRouter::HandleMouseLeftPressed(const FInputActionValue& Value)
 	switch (InputMode)
 	{
 	case ERTSInputMode::EntityManipulation:
+		if (ARTSMinimalPlayerController* ctl = Cast<ARTSMinimalPlayerController>(GetPlayerController()))
+		{
+			if (ctl->IsCameraLockedToEntity())
+			{
+				ctl->HandleMouseLeftPressed(Value);
+				break;
+			}
+		}
 		HandleEntityManipulationLeftPressed(Value);
 		break;
 	case ERTSInputMode::NavigationTest:
@@ -589,6 +436,14 @@ void URTSInputRouter::HandleMouseLeftTriggered(const FInputActionValue& Value)
 	switch (InputMode)
 	{
 	case ERTSInputMode::EntityManipulation:
+		if (ARTSMinimalPlayerController* ctl = Cast<ARTSMinimalPlayerController>(GetPlayerController()))
+		{
+			if (ctl->IsCameraLockedToEntity())
+			{
+				ctl->HandleMouseLeftTriggered(Value);
+				break;
+			}
+		}
 		HandleEntityManipulationLeftTriggered(Value);
 		break;
 	case ERTSInputMode::NavigationTest:
@@ -604,6 +459,14 @@ void URTSInputRouter::HandleMouseLeftReleased(const FInputActionValue& Value)
 	switch (InputMode)
 	{
 	case ERTSInputMode::EntityManipulation:
+		if (ARTSMinimalPlayerController* ctl = Cast<ARTSMinimalPlayerController>(GetPlayerController()))
+		{
+			if (ctl->IsCameraLockedToEntity())
+			{
+				ctl->HandleMouseLeftReleased(Value);
+				break;
+			}
+		}
 		HandleEntityManipulationLeftReleased(Value);
 		break;
 	case ERTSInputMode::NavigationTest:
@@ -755,6 +618,94 @@ void URTSInputRouter::HandleNavigationTestRightReleased(const FInputActionValue&
 {
 	(void)Value;
 	// 导航测试状态下右键暂无释放语义（关闭在按下时已完成）。
+}
+
+// ── Slate 预处理器事件的按状态分发 ──────────────────────────────────────────────────────────
+//
+// 与鼠标左右键的入口同构：外部（FRTSSelectorInputProcessor）只调这里，本类按 InputMode 分发。
+
+void URTSInputRouter::HandlePointerMoved()
+{
+	if (ARTSMinimalPlayerController* ctl = Cast<ARTSMinimalPlayerController>(GetPlayerController()))
+	{
+		if (ctl->IsCameraLockedToEntity())
+		{
+			return;
+		}
+	}
+	switch (InputMode)
+	{
+	case ERTSInputMode::EntityManipulation:
+		HandleEntityManipulationPointerMoved();
+		break;
+	case ERTSInputMode::NavigationTest:
+		HandleNavigationTestPointerMoved();
+		break;
+	default:
+		break;
+	}
+}
+
+bool URTSInputRouter::HandleKeyDown(FKey key, bool isShiftDown, bool isCtrlDown, bool isAltDown, bool isCommandDown, bool bIsRepeat)
+{
+	if (ARTSMinimalPlayerController* ctl = Cast<ARTSMinimalPlayerController>(GetPlayerController()))
+	{
+		if (ctl->IsCameraLockedToEntity())
+		{
+			return false;
+		}
+	}
+
+	switch (InputMode)
+	{
+	case ERTSInputMode::EntityManipulation:
+		return HandleEntityManipulationCycleGroup(key, isShiftDown, isCtrlDown, isAltDown, isCommandDown,bIsRepeat);
+	case ERTSInputMode::NavigationTest:
+		return HandleNavigationTestCycleGroup(bIsRepeat);
+	default:
+		return false;
+	}
+}
+
+void URTSInputRouter::HandleEntityManipulationPointerMoved()
+{
+	if (Selector)
+	{
+		Selector->HandlePointerMoved();
+	}
+}
+
+void URTSInputRouter::HandleNavigationTestPointerMoved()
+{
+	// 导航测试状态下暂无鼠标移动语义。
+}
+
+bool URTSInputRouter::HandleEntityManipulationCycleGroup(FKey key, bool isShiftDown, bool isCtrlDown, bool isAltDown, bool isCommandDown, bool bIsRepeat)
+{
+	if (key != EKeys::Tab || isShiftDown || isCtrlDown || isAltDown || isCommandDown)
+	{
+		return false;
+	}
+	APlayerController* PC = GetPlayerController();
+	ULocalPlayer* LocalPlayer = PC ? PC->GetLocalPlayer() : nullptr;
+	if (!LocalPlayer)
+	{
+		return false;
+	}
+	if (URTSSelectionSubsystem* Selection = LocalPlayer->GetSubsystem<URTSSelectionSubsystem>())
+	{
+		// Selection owns Tab before Slate turns it into focus navigation. A held key stays consumed.
+		if (!bIsRepeat) Selection->CycleGroup();
+		return true;
+	}
+	return false;
+}
+
+bool URTSInputRouter::HandleNavigationTestCycleGroup(bool bIsRepeat)
+{
+	(void)bIsRepeat;
+	// 导航测试状态不接管 Tab，交还 Slate 的默认焦点导航。
+	return false;
 }
 
 void URTSInputRouter::BindInputMappingContext()
@@ -935,6 +886,10 @@ void URTSInputRouter::InstallStrategyMouseCursors()
 		EMouseCursor::Crosshairs,
 		SNew(SRTSStrategyCursor)
 		.Style(ERTSStrategyCursorStyle::Targeting));
+	ViewportClient->SetSoftwareCursorWidget(
+		EMouseCursor::Custom,
+		SNew(SRTSStrategyCursor)
+		.Style(ERTSStrategyCursorStyle::Aim));
 
 	PlayerController->DefaultMouseCursor = EMouseCursor::Default;
 	PlayerController->CurrentMouseCursor = EMouseCursor::Default;
@@ -957,6 +912,9 @@ void URTSInputRouter::RestoreStrategyMouseCursors()
 			TSharedPtr<SWidget>());
 		ViewportClient->SetSoftwareCursorWidget(
 			EMouseCursor::Crosshairs,
+			TSharedPtr<SWidget>());
+		ViewportClient->SetSoftwareCursorWidget(
+			EMouseCursor::Custom,
 			TSharedPtr<SWidget>());
 		ViewportClient->RebuildCursors();
 	}
